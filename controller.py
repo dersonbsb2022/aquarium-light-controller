@@ -225,6 +225,28 @@ def validate_config(cfg: dict) -> list:
                 if k in cm and cm[k] not in ("R", "G", "B"):
                     errors.append(f"channel_map.{k} must be 'R', 'G', or 'B'")
 
+    if "channel_curves" in cfg:
+        cc = cfg["channel_curves"]
+        if not isinstance(cc, dict):
+            errors.append("channel_curves must be an object")
+        else:
+            for ch in ("blue", "white", "uv"):
+                if ch not in cc:
+                    continue
+                curve = cc[ch]
+                if not isinstance(curve, dict):
+                    errors.append(f"channel_curves.{ch} must be an object")
+                    continue
+                for key in ("min_byte", "max_byte"):
+                    if key in curve:
+                        v = curve[key]
+                        if not isinstance(v, (int, float)) or v < 0 or v > 255:
+                            errors.append(f"channel_curves.{ch}.{key} must be 0-255")
+                if "gamma" in curve:
+                    v = curve["gamma"]
+                    if not isinstance(v, (int, float)) or v < 0.1 or v > 5.0:
+                        errors.append(f"channel_curves.{ch}.gamma must be 0.1-5.0")
+
     if "schedule" in cfg:
         sched = cfg["schedule"]
         if not isinstance(sched, list):
@@ -274,6 +296,7 @@ class AquariumController:
         self.drift_events_count = 0       # cumulative count of drift detections
         self.last_drift_at = None         # epoch of most recent drift event
         self.last_drift_reason = None     # short text describing last drift
+        self.test_mode_until = 0.0        # while > now, schedule loop is paused
         self.status = "initializing"
         self.last_error = None
         self.lock = threading.Lock()
@@ -308,20 +331,59 @@ class AquariumController:
         log.info("Reconnect requested")
 
     def _pct_to_byte(self, pct: float) -> int:
-        """Convert 0-100 percentage to 0-255 byte."""
+        """Convert 0-100 percentage to 0-255 byte (linear, no calibration)."""
         return max(0, min(255, int(round(pct / 100.0 * 255))))
 
     def _byte_to_pct(self, byte: int) -> float:
         """Convert 0-255 byte back to 0-100 percentage."""
         return round(max(0, min(255, byte)) / 255.0 * 100.0, 1)
 
+    def _pct_to_byte_calibrated(self, pct: float, channel: str) -> int:
+        """
+        Convert 0-100 percentage to 0-255 byte using optional per-channel
+        calibration to compensate for hardware quirks.
+
+        The Magic Home PWM driver and the LEDs themselves have a "dead zone"
+        at the bottom of the curve where small byte values produce no visible
+        light. Channels with different LEDs (e.g. 16 blue vs 4 UV) typically
+        have different thresholds.
+
+        Configurable via config.channel_curves[channel]:
+          min_byte: byte value that just barely lights the channel (default 0)
+          max_byte: byte value at 100% (default 255)
+          gamma:    perceptual curve (1.0 = linear, 2.2 = perceptual,
+                    higher = more emphasis on lower percentages)
+
+        With min_byte=30, gamma=1.0, max_byte=255:
+          0%   → byte 0  (off)
+          1%   → byte 32
+          50%  → byte 142
+          100% → byte 255
+        """
+        if pct <= 0:
+            return 0
+        curves = self.config.get("channel_curves", {})
+        curve = curves.get(channel, {}) if isinstance(curves, dict) else {}
+        min_b = max(0, min(255, int(curve.get("min_byte", 0))))
+        max_b = max(0, min(255, int(curve.get("max_byte", 255))))
+        if max_b < min_b:
+            min_b, max_b = max_b, min_b
+        gamma = curve.get("gamma", 1.0)
+        try:
+            gamma = max(0.1, min(5.0, float(gamma)))
+        except (TypeError, ValueError):
+            gamma = 1.0
+        norm = (min(100.0, pct) / 100.0) ** gamma
+        byte = int(round(min_b + (max_b - min_b) * norm))
+        return max(0, min(255, byte))
+
     def _target_to_bytes(self, target: dict) -> tuple:
         """Translate a target dict (blue/white/uv %) to a (R,G,B) byte tuple."""
         cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
         channels = {"R": 0, "G": 0, "B": 0}
-        channels[cmap.get("blue", "R")] = self._pct_to_byte(target["blue"])
-        channels[cmap.get("white", "G")] = self._pct_to_byte(target["white"])
-        channels[cmap.get("uv", "B")] = self._pct_to_byte(target["uv"])
+        for ch in ("blue", "white", "uv"):
+            phys = cmap.get(ch, "R" if ch == "blue" else "G" if ch == "white" else "B")
+            channels[phys] = self._pct_to_byte_calibrated(target[ch], ch)
         return (channels["R"], channels["G"], channels["B"])
 
     def _apply_levels(self, blue: float, white: float, uv: float):
@@ -526,11 +588,23 @@ class AquariumController:
                 self.last_verified_at = 0.0
                 self._we_turned_off = True  # assume unknown state; turnOn if needed
 
+            now_ts = time.time()
+
+            # Test mode: schedule application is paused while the user is
+            # diagnosing the bulb / hardware via /api/test. The loop keeps
+            # ticking but does not override the manual values.
+            if now_ts < self.test_mode_until:
+                self.status = "test"
+                # Force re-sync from schedule once test ends so the schedule
+                # value is immediately reapplied (regardless of caching).
+                self.last_applied_bytes = None
+                time.sleep(min(2.0, self.test_mode_until - now_ts + 0.1))
+                continue
+
             target = self.compute_target()
             self.target_levels = target
             target_bytes = self._target_to_bytes(target)
 
-            now_ts = time.time()
             verify_interval = self.config.get("verification_interval_seconds", 300)
             time_since_verify = now_ts - self.last_verified_at
             should_verify = time_since_verify >= verify_interval
@@ -675,8 +749,74 @@ class APIHandler(SimpleHTTPRequestHandler):
         elif self.path == "/api/reconnect":
             controller.request_reconnect()
             self._send_json({"ok": True, "status": controller.status})
+        elif self.path == "/api/test":
+            self._handle_test()
+        elif self.path == "/api/test/cancel":
+            controller.test_mode_until = 0.0
+            controller.last_applied_bytes = None
+            self._send_json({"ok": True, "message": "test mode cancelled"})
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _handle_test(self):
+        """
+        Diagnostic endpoint: send raw RGB bytes (0-255) directly to the bulb,
+        bypassing the schedule for `hold_seconds`. Use this to find the
+        threshold of each channel — i.e. the minimum byte value at which
+        your physical LEDs actually start emitting light.
+
+        Body example:
+          {"r": 30, "g": 0, "b": 0, "hold_seconds": 30}
+                ↑      ↑      ↑              ↑
+              blue   white   UV          paused for 30s
+              (with default channel_map)
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            r = int(body.get("r", 0))
+            g = int(body.get("g", 0))
+            b = int(body.get("b", 0))
+            hold_s = float(body.get("hold_seconds", 30))
+            if not all(0 <= x <= 255 for x in (r, g, b)):
+                self._send_json({"error": "r,g,b must be 0-255"}, 400)
+                return
+            if not (1 <= hold_s <= 600):
+                self._send_json({"error": "hold_seconds must be 1-600"}, 400)
+                return
+        except Exception as e:
+            self._send_json({"error": f"bad request: {e}"}, 400)
+            return
+
+        with controller.lock:
+            if not controller.bulb:
+                self._send_json({"error": "bulb not connected"}, 503)
+                return
+            try:
+                if r == 0 and g == 0 and b == 0:
+                    controller.bulb.turnOff()
+                    controller._we_turned_off = True
+                else:
+                    if controller._we_turned_off:
+                        controller.bulb.turnOn()
+                        time.sleep(0.3)
+                        controller._we_turned_off = False
+                    controller.bulb.setRgb(r, g, b)
+                controller.test_mode_until = time.time() + hold_s
+                controller.last_applied_bytes = (r, g, b)
+                log.info(
+                    "TEST mode: raw RGB=(%d,%d,%d) hold=%.1fs",
+                    r, g, b, hold_s,
+                )
+                self._send_json({
+                    "ok": True,
+                    "applied": {"r": r, "g": g, "b": b},
+                    "hold_seconds": hold_s,
+                    "until": controller.test_mode_until,
+                    "tip": "schedule will resume automatically. POST /api/test/cancel to abort early.",
+                })
+            except Exception as e:
+                self._send_json({"error": f"failed: {e}"}, 500)
 
 # ---------------------------------------------------------------------------
 # Web server for static files (dashboard)
