@@ -117,12 +117,27 @@ def parse_time(t: str) -> float:
     return int(parts[0]) * 60 + int(parts[1])
 
 
-def interpolate_schedule(now: float, schedule: list, trans: float) -> dict:
+def interpolate_schedule(now: float, schedule: list, dawn_ramp: float) -> dict:
     """
-    Compute brightness levels at a given minute using cosine ease-in-out.
+    Compute brightness levels at a given minute using continuous cosine
+    interpolation between adjacent schedule points.
 
-    This is the single implementation shared by the control loop and the
-    preview API endpoint, eliminating duplicate logic.
+    The light is ALWAYS transitioning between the previous and next scheduled
+    point — there are no "hold" periods. This mirrors how the sun actually
+    behaves in nature and avoids the artifact where the light sits flat for
+    long periods and then ramps abruptly.
+
+    Layout:
+      • before (first - dawn_ramp):  lights fully off
+      • during dawn_ramp window:     smooth fade-in from 0 to first point
+      • between adjacent points:     continuous cosine interpolation,
+                                     proportional to the time between them
+      • after last point:            hold last point's values (typically 0
+                                     if the schedule ends with "Apagado")
+
+    `dawn_ramp` controls the optional fade-in BEFORE the first scheduled
+    point. To get a sustained noon peak, simply add two points with the
+    same values (e.g. 12:00 and 14:00 both at peak levels).
     """
     schedule = sorted(schedule, key=lambda s: parse_time(s["time"]))
     if not schedule:
@@ -131,33 +146,36 @@ def interpolate_schedule(now: float, schedule: list, trans: float) -> dict:
     first_time = parse_time(schedule[0]["time"])
     last_time = parse_time(schedule[-1]["time"])
 
-    if now < first_time - trans:
+    if now < first_time - dawn_ramp:
         return {"blue": 0, "white": 0, "uv": 0}
+
+    if now < first_time:
+        if dawn_ramp <= 0:
+            return {"blue": 0, "white": 0, "uv": 0}
+        elapsed = now - (first_time - dawn_ramp)
+        progress = min(1.0, elapsed / dawn_ramp)
+        smooth = (1 - math.cos(progress * math.pi)) / 2.0
+        first = schedule[0]
+        return {ch: first[ch] * smooth for ch in ("blue", "white", "uv")}
 
     if now >= last_time:
         last = schedule[-1]
         return {"blue": last["blue"], "white": last["white"], "uv": last["uv"]}
 
-    for i, point in enumerate(schedule):
-        target_time = parse_time(point["time"])
-        prev_levels = (
-            {"blue": schedule[i-1]["blue"], "white": schedule[i-1]["white"], "uv": schedule[i-1]["uv"]}
-            if i > 0
-            else {"blue": 0, "white": 0, "uv": 0}
-        )
-        curr_levels = {"blue": point["blue"], "white": point["white"], "uv": point["uv"]}
-        transition_start = target_time - trans
-
-        if now < target_time:
-            if now >= transition_start:
-                elapsed = now - transition_start
-                progress = min(1.0, elapsed / trans) if trans > 0 else 1.0
-                smooth = (1 - math.cos(progress * math.pi)) / 2.0
-                return {
-                    ch: prev_levels[ch] + (curr_levels[ch] - prev_levels[ch]) * smooth
-                    for ch in ("blue", "white", "uv")
-                }
-            return prev_levels
+    for i in range(len(schedule) - 1):
+        t0 = parse_time(schedule[i]["time"])
+        t1 = parse_time(schedule[i + 1]["time"])
+        if t0 <= now < t1:
+            duration = t1 - t0
+            if duration <= 0:
+                return {ch: schedule[i + 1][ch] for ch in ("blue", "white", "uv")}
+            progress = (now - t0) / duration
+            smooth = (1 - math.cos(progress * math.pi)) / 2.0
+            a, b = schedule[i], schedule[i + 1]
+            return {
+                ch: a[ch] + (b[ch] - a[ch]) * smooth
+                for ch in ("blue", "white", "uv")
+            }
 
     last = schedule[-1]
     return {"blue": last["blue"], "white": last["white"], "uv": last["uv"]}
@@ -250,6 +268,7 @@ class AquariumController:
         self.last_applied_bytes = None    # last (R,G,B) tuple successfully sent
         self.last_verified_at = 0.0       # epoch timestamp of last real refreshState
         self.last_applied_at = 0.0        # epoch timestamp of last setRgb/turnOff
+        self.last_log_at = 0.0            # rate-limit periodic value logging to ~1/min
         self.in_sync = True               # last verification matched expected state
         self.status = "initializing"
         self.last_error = None
@@ -319,9 +338,19 @@ class AquariumController:
                 self.bulb.setRgb(r, g, b)
 
             self.current_levels = {"blue": blue, "white": white, "uv": uv}
+            now_ts = time.time()
             self.last_applied_bytes = (r, g, b)
-            self.last_applied_at = time.time()
+            self.last_applied_at = now_ts
             self.last_error = None
+            # Periodic visibility log: confirms the controller is actively
+            # interpolating between schedule points (not just at exact times).
+            # Rate-limited to once per minute to avoid log spam during ramps.
+            if now_ts - self.last_log_at >= 60:
+                log.info(
+                    "Applied: B=%.1f%% W=%.1f%% UV=%.1f%%  RGB=(%d,%d,%d)",
+                    blue, white, uv, r, g, b,
+                )
+                self.last_log_at = now_ts
         except Exception as e:
             log.error("Error applying levels: %s", e)
             self.last_error = str(e)

@@ -264,6 +264,19 @@
     letter-spacing: 0.05em;
   }
 
+  .next-point {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    text-align: center;
+    margin-bottom: 14px;
+    letter-spacing: 0.02em;
+  }
+
+  .next-point .arrow { color: var(--blue); }
+  .next-point .label { color: var(--text); }
+  .next-point .eta   { color: var(--amber); }
+
   /* Schedule editor */
   .schedule-list {
     display: flex;
@@ -551,6 +564,7 @@
   <!-- Current time & levels -->
   <div class="card">
     <div class="time-now" id="currentTime">--:--:--</div>
+    <div class="next-point" id="nextPoint">—</div>
     <div class="levels-grid">
       <div class="level-item blue">
         <div class="level-label">Azul</div>
@@ -601,8 +615,8 @@
         <input type="text" id="cfgIp" placeholder="192.168.1.100" oninput="markDirty()">
       </div>
       <div class="setting-item">
-        <label>Duração da transição (min)</label>
-        <input type="number" id="cfgTransition" min="1" max="120" value="30" oninput="markDirty()">
+        <label title="Tempo de fade-in das luzes antes do primeiro ponto da agenda (amanhecer)">Duração do amanhecer (min)</label>
+        <input type="number" id="cfgTransition" min="0" max="180" value="60" oninput="markDirty()">
       </div>
       <div class="setting-item">
         <label>Intervalo de atualização (seg)</label>
@@ -646,6 +660,34 @@ function safeSetValue(id, value) {
   if (document.activeElement !== el) {
     el.value = value;
   }
+}
+
+// ---- Next schedule point indicator ----
+function updateNextPoint() {
+  const el = document.getElementById('nextPoint');
+  if (!scheduleData || !scheduleData.length) {
+    el.textContent = '—';
+    return;
+  }
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+  const parseT = t => { const p = t.split(':'); return +p[0] * 60 + +p[1]; };
+  const sched = [...scheduleData].sort((a, b) => parseT(a.time) - parseT(b.time));
+
+  const next = sched.find(s => parseT(s.time) > nowMin);
+  if (!next) {
+    el.innerHTML = '<span class="arrow">●</span> ciclo encerrado';
+    return;
+  }
+  const minsTo = parseT(next.time) - nowMin;
+  const h = Math.floor(minsTo / 60);
+  const m = Math.floor(minsTo % 60);
+  const eta = h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m}min`;
+  const label = next.label ? ` · ${next.label}` : '';
+  el.innerHTML =
+    `<span class="arrow">→</span> próximo ponto: <span class="label">${next.time}</span>` +
+    ` (B ${next.blue}% W ${next.white}% UV ${next.uv}%)${label} ` +
+    `em <span class="eta">${eta}</span>`;
 }
 
 // ---- Relative time formatting ----
@@ -987,42 +1029,52 @@ function renderChartLocal() {
   renderChart(data);
 }
 
-// Mirror of server-side interpolate_schedule — used only as local fallback
-// when the API is unreachable. Keep in sync with controller.py if the
-// interpolation logic ever changes.
-function computeAt(now, schedule, trans) {
+// Mirror of server-side interpolate_schedule — continuous cosine
+// interpolation between every adjacent pair of schedule points (no holds).
+// Keep in sync with controller.py if the interpolation logic ever changes.
+function computeAt(now, schedule, dawnRamp) {
   if (!schedule.length) return { blue: 0, white: 0, uv: 0 };
   const parseT = t => { const p = t.split(':'); return +p[0] * 60 + +p[1]; };
-  const first = parseT(schedule[0].time);
-  const last  = parseT(schedule[schedule.length - 1].time);
+  const sched = [...schedule].sort((a, b) => parseT(a.time) - parseT(b.time));
+  const first = parseT(sched[0].time);
+  const last  = parseT(sched[sched.length - 1].time);
 
-  if (now < first - trans) return { blue: 0, white: 0, uv: 0 };
+  if (now < first - dawnRamp) return { blue: 0, white: 0, uv: 0 };
+
+  if (now < first) {
+    if (dawnRamp <= 0) return { blue: 0, white: 0, uv: 0 };
+    const p = Math.min(1, (now - (first - dawnRamp)) / dawnRamp);
+    const s = (1 - Math.cos(p * Math.PI)) / 2;
+    const f = sched[0];
+    return { blue: f.blue * s, white: f.white * s, uv: f.uv * s };
+  }
+
   if (now >= last) {
-    const l = schedule[schedule.length - 1];
+    const l = sched[sched.length - 1];
     return { blue: l.blue, white: l.white, uv: l.uv };
   }
 
-  for (let i = 0; i < schedule.length; i++) {
-    const tt   = parseT(schedule[i].time);
-    const prev = i > 0
-      ? { blue: schedule[i-1].blue, white: schedule[i-1].white, uv: schedule[i-1].uv }
-      : { blue: 0, white: 0, uv: 0 };
-    const curr = { blue: schedule[i].blue, white: schedule[i].white, uv: schedule[i].uv };
-    const start = tt - trans;
-    if (now < tt) {
-      if (now >= start) {
-        const p = trans > 0 ? (now - start) / trans : 1;
-        const s = (1 - Math.cos(p * Math.PI)) / 2;
-        return {
-          blue:  prev.blue  + (curr.blue  - prev.blue)  * s,
-          white: prev.white + (curr.white - prev.white) * s,
-          uv:    prev.uv    + (curr.uv    - prev.uv)    * s
-        };
+  for (let i = 0; i < sched.length - 1; i++) {
+    const t0 = parseT(sched[i].time);
+    const t1 = parseT(sched[i + 1].time);
+    if (t0 <= now && now < t1) {
+      const dur = t1 - t0;
+      if (dur <= 0) {
+        const c = sched[i + 1];
+        return { blue: c.blue, white: c.white, uv: c.uv };
       }
-      return prev;
+      const p = (now - t0) / dur;
+      const s = (1 - Math.cos(p * Math.PI)) / 2;
+      const a = sched[i], b = sched[i + 1];
+      return {
+        blue:  a.blue  + (b.blue  - a.blue)  * s,
+        white: a.white + (b.white - a.white) * s,
+        uv:    a.uv    + (b.uv    - a.uv)    * s,
+      };
     }
   }
-  const l = schedule[schedule.length - 1];
+
+  const l = sched[sched.length - 1];
   return { blue: l.blue, white: l.white, uv: l.uv };
 }
 
@@ -1142,6 +1194,9 @@ function updateClock() {
   const now = new Date();
   document.getElementById('currentTime').textContent =
     now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  // Refresh "próximo ponto" countdown every second
+  updateNextPoint();
 
   // Redraw chart every minute to keep the now-line position accurate
   if (now.getSeconds() === 0 && chart) chart.draw();
