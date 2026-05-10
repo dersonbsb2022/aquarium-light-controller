@@ -40,22 +40,29 @@ BUILD_INFO = {
 
 DEFAULT_CONFIG = {
     "controller_ip": "192.168.1.100",
-    "transition_minutes": 30,
+    "transition_minutes": 60,
     "update_interval_seconds": 10,
     "channel_map": {
         "blue": "R",
         "white": "G",
         "uv": "B"
     },
+    # Reef-style sun cycle for a 16 blue / 4 white / 4 UV fixture.
+    # Blue dominates throughout (water filters warm wavelengths in nature).
+    # Sustained noon peak (12:00–14:00) mirrors real reef irradiance.
+    # Smooth dawn/dusk ramps avoid the abrupt cuts of stock controllers.
     "schedule": [
-        {"time": "07:00", "blue": 25, "white": 0,   "uv": 15, "label": "Amanhecer - azul suave"},
-        {"time": "08:00", "blue": 40, "white": 15,  "uv": 25, "label": "Manhã cedo"},
-        {"time": "10:00", "blue": 60, "white": 50,  "uv": 50, "label": "Manhã"},
-        {"time": "12:00", "blue": 80, "white": 100, "uv": 80, "label": "Meio-dia - pico"},
-        {"time": "15:00", "blue": 60, "white": 50,  "uv": 50, "label": "Tarde"},
-        {"time": "17:00", "blue": 35, "white": 10,  "uv": 25, "label": "Entardecer"},
-        {"time": "18:00", "blue": 15, "white": 0,   "uv": 10, "label": "Crepúsculo"},
-        {"time": "18:30", "blue": 0,  "white": 0,   "uv": 0,  "label": "Desligado"},
+        {"time": "06:30", "blue": 3,  "white": 0,  "uv": 0,  "label": "Pré-amanhecer (luar)"},
+        {"time": "07:30", "blue": 15, "white": 0,  "uv": 5,  "label": "Amanhecer azul"},
+        {"time": "09:00", "blue": 40, "white": 10, "uv": 20, "label": "Manhã"},
+        {"time": "10:30", "blue": 70, "white": 30, "uv": 50, "label": "Manhã alta"},
+        {"time": "12:00", "blue": 95, "white": 60, "uv": 80, "label": "Meio-dia (pico)"},
+        {"time": "14:00", "blue": 95, "white": 60, "uv": 80, "label": "Pico sustentado"},
+        {"time": "15:30", "blue": 75, "white": 35, "uv": 55, "label": "Tarde"},
+        {"time": "17:00", "blue": 45, "white": 12, "uv": 25, "label": "Final da tarde"},
+        {"time": "18:30", "blue": 18, "white": 0,  "uv": 5,  "label": "Pôr do sol"},
+        {"time": "19:30", "blue": 5,  "white": 0,  "uv": 0,  "label": "Crepúsculo"},
+        {"time": "20:00", "blue": 0,  "white": 0,  "uv": 0,  "label": "Apagado"},
     ]
 }
 
@@ -396,6 +403,10 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._send_json(BUILD_INFO)
         elif self.path == "/api/config":
             self._send_json(controller.config)
+        elif self.path == "/api/defaults":
+            # Returns the factory schedule. Read-only; does NOT touch saved config.
+            # Frontend loads it into the editor so the user can review and Save.
+            self._send_json(copy.deepcopy(DEFAULT_CONFIG))
         elif self.path == "/api/preview":
             preview = []
             schedule = controller.config["schedule"]

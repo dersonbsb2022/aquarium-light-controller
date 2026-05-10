@@ -553,6 +553,7 @@
     <div class="btn-row">
       <button class="btn btn-primary" onclick="saveConfig()">💾 Salvar</button>
       <button class="btn btn-secondary" onclick="forceReload()">↻ Recarregar</button>
+      <button class="btn btn-secondary" onclick="restoreDefaults()" title="Carrega o ciclo solar padrão (revise e clique Salvar para aplicar)">🌞 Restaurar padrão</button>
       <span class="unsaved-badge" id="unsavedBadge">● alterações não salvas</span>
     </div>
   </div>
@@ -801,6 +802,36 @@ async function saveConfig() {
     }
   } catch (e) {
     showToast('Erro de conexão', 'error');
+  }
+}
+
+// ---- Restore factory defaults ----
+async function restoreDefaults() {
+  const ok = confirm(
+    'Restaurar configurações padrão?\n\n' +
+    'Isso vai carregar o ciclo solar otimizado para reef (16B/4W/4UV).\n' +
+    'Suas configurações atuais NÃO serão perdidas até você clicar em Salvar.\n\n' +
+    'Continuar?'
+  );
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`${API}/api/defaults`);
+    const defaults = await res.json();
+
+    safeSetValue('cfgIp',         document.getElementById('cfgIp').value || defaults.controller_ip);
+    safeSetValue('cfgTransition', defaults.transition_minutes);
+    safeSetValue('cfgInterval',   defaults.update_interval_seconds);
+
+    scheduleData = JSON.parse(JSON.stringify(defaults.schedule));
+    renderSchedule();
+    document.querySelectorAll('.schedule-row').forEach(r => r.classList.add('dirty'));
+    markDirty();
+    loadPreviewDebounced();
+
+    showToast('Padrão carregado — revise e clique Salvar', 'success');
+  } catch (e) {
+    showToast('Erro ao carregar padrão', 'error');
   }
 }
 
