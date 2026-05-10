@@ -1,9 +1,9 @@
 services:
   aquarium-light:
-    build: .
-    container_name: aquarium-light
-    restart: unless-stopped
-    network_mode: host    # necessário para descobrir o controlador na rede local
+    image: ghcr.io/dersonbsb2022/aquarium-light-controller:latest
+    ports:
+      - "8080:8080"
+      - "8081:8081"
     volumes:
       - aquarium_data:/data
     environment:
@@ -11,10 +11,11 @@ services:
       - WEB_PORT=8080
       - API_PORT=8081
       - TZ=America/Sao_Paulo
-    # Se preferir não usar network_mode: host, descomente abaixo:
-    # ports:
-    #   - "8080:8080"
-    #   - "8081:8081"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
 
 volumes:
   aquarium_data:
