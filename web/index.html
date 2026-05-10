@@ -100,8 +100,9 @@
     animation: pulse 2s ease-in-out infinite;
   }
 
-  .status-dot.disconnected { background: var(--red); animation: none; }
-  .status-dot.initializing { background: var(--amber); }
+  .status-dot.disconnected  { background: var(--red);   animation: none; }
+  .status-dot.reconnecting  { background: var(--amber);  }
+  .status-dot.initializing  { background: var(--amber); }
 
   @keyframes pulse {
     0%, 100% { opacity: 1; }
@@ -153,9 +154,9 @@
     border-radius: 0 0 10px 10px;
   }
 
-  .level-item.blue::after { background: var(--blue); box-shadow: 0 0 12px var(--blue-glow); }
+  .level-item.blue::after  { background: var(--blue);    box-shadow: 0 0 12px var(--blue-glow); }
   .level-item.white::after { background: var(--white-ch); }
-  .level-item.uv::after { background: var(--uv); box-shadow: 0 0 12px var(--uv-glow); }
+  .level-item.uv::after    { background: var(--uv);      box-shadow: 0 0 12px var(--uv-glow); }
 
   .level-label {
     font-size: 0.75rem;
@@ -171,9 +172,9 @@
     font-weight: 600;
   }
 
-  .level-item.blue .level-value { color: var(--blue); }
+  .level-item.blue  .level-value { color: var(--blue); }
   .level-item.white .level-value { color: var(--white-ch); }
-  .level-item.uv .level-value { color: var(--uv); }
+  .level-item.uv    .level-value { color: var(--uv); }
 
   .level-unit {
     font-size: 0.85rem;
@@ -246,7 +247,7 @@
   }
 
   .schedule-row input[type="range"].white-slider { accent-color: var(--white-ch); }
-  .schedule-row input[type="range"].uv-slider { accent-color: var(--uv); }
+  .schedule-row input[type="range"].uv-slider    { accent-color: var(--uv); }
 
   .slider-cell {
     display: flex;
@@ -306,6 +307,7 @@
     gap: 10px;
     margin-top: 14px;
     flex-wrap: wrap;
+    align-items: center;
   }
 
   .btn {
@@ -345,6 +347,23 @@
     margin-top: 6px;
   }
   .btn-add:hover { border-color: var(--blue); background: rgba(59,130,246,0.05); }
+
+  /* Unsaved changes badge */
+  .unsaved-badge {
+    display: none;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: rgba(245,158,11,0.12);
+    border: 1px solid rgba(245,158,11,0.35);
+    color: var(--amber);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .unsaved-badge.visible { display: flex; }
 
   /* Settings */
   .settings-grid {
@@ -395,7 +414,7 @@
 
   .toast.show { transform: translateY(0); opacity: 1; }
   .toast.success { background: #065f46; color: #a7f3d0; border: 1px solid #10b981; }
-  .toast.error { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
+  .toast.error   { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
 
   /* Error banner */
   .error-banner {
@@ -473,7 +492,8 @@
     <button class="btn btn-add" onclick="addRow()">＋ Adicionar horário</button>
     <div class="btn-row">
       <button class="btn btn-primary" onclick="saveConfig()">💾 Salvar</button>
-      <button class="btn btn-secondary" onclick="loadState()">↻ Recarregar</button>
+      <button class="btn btn-secondary" onclick="forceReload()">↻ Recarregar</button>
+      <span class="unsaved-badge" id="unsavedBadge">● alterações não salvas</span>
     </div>
   </div>
 
@@ -483,15 +503,15 @@
     <div class="settings-grid">
       <div class="setting-item">
         <label>IP do Controlador</label>
-        <input type="text" id="cfgIp" placeholder="192.168.1.100">
+        <input type="text" id="cfgIp" placeholder="192.168.1.100" oninput="markDirty()">
       </div>
       <div class="setting-item">
         <label>Duração da transição (min)</label>
-        <input type="number" id="cfgTransition" min="1" max="120" value="30">
+        <input type="number" id="cfgTransition" min="1" max="120" value="30" oninput="markDirty()">
       </div>
       <div class="setting-item">
         <label>Intervalo de atualização (seg)</label>
-        <input type="number" id="cfgInterval" min="2" max="60" value="10">
+        <input type="number" id="cfgInterval" min="2" max="60" value="10" oninput="markDirty()">
       </div>
     </div>
     <div class="btn-row">
@@ -511,6 +531,27 @@
 const API = `${location.protocol}//${location.hostname}:8081`;
 let chart = null;
 let scheduleData = [];
+let isDirty = false;
+let firstLoad = true;
+
+// ---- Dirty state tracking ----
+function markDirty() {
+  isDirty = true;
+  document.getElementById('unsavedBadge').classList.add('visible');
+}
+
+function clearDirty() {
+  isDirty = false;
+  document.getElementById('unsavedBadge').classList.remove('visible');
+}
+
+// ---- Safe field update: skip if the field is currently focused ----
+function safeSetValue(id, value) {
+  const el = document.getElementById(id);
+  if (document.activeElement !== el) {
+    el.value = value;
+  }
+}
 
 // ---- State polling ----
 async function loadState() {
@@ -521,17 +562,25 @@ async function loadState() {
     // Status
     document.getElementById('statusText').textContent = s.status;
     const dot = document.getElementById('statusDot');
-    dot.className = 'status-dot' + (s.status === 'running' ? '' : s.status === 'disconnected' ? ' disconnected' : ' initializing');
+    const dotClass = s.status === 'running'
+      ? ''
+      : s.status === 'disconnected' ? ' disconnected'
+      : s.status === 'reconnecting' ? ' reconnecting'
+      : ' initializing';
+    dot.className = 'status-dot' + dotClass;
 
-    // Time
-    document.getElementById('currentTime').textContent = s.time;
+    // Time comes from local clock (updated every second); server time is only
+    // used as a fallback on the very first load to avoid a blank display.
+    if (firstLoad) {
+      document.getElementById('currentTime').textContent = s.time;
+    }
 
     // Levels
-    document.getElementById('lvlBlue').textContent = Math.round(s.current_levels.blue);
+    document.getElementById('lvlBlue').textContent  = Math.round(s.current_levels.blue);
     document.getElementById('lvlWhite').textContent = Math.round(s.current_levels.white);
-    document.getElementById('lvlUV').textContent = Math.round(s.current_levels.uv);
+    document.getElementById('lvlUV').textContent    = Math.round(s.current_levels.uv);
 
-    // Error
+    // Error banner
     const banner = document.getElementById('errorBanner');
     if (s.last_error) {
       banner.textContent = `Erro: ${s.last_error}`;
@@ -540,20 +589,42 @@ async function loadState() {
       banner.style.display = 'none';
     }
 
-    // Settings
-    document.getElementById('cfgIp').value = s.controller_ip || '';
-    document.getElementById('cfgTransition').value = s.transition_minutes;
-    document.getElementById('cfgInterval').value = s.update_interval_seconds;
+    // Settings — only update if not dirty and fields are not focused
+    if (!isDirty) {
+      safeSetValue('cfgIp',         s.controller_ip || '');
+      safeSetValue('cfgTransition', s.transition_minutes);
+      safeSetValue('cfgInterval',   s.update_interval_seconds);
+    }
 
-    // Schedule
-    scheduleData = s.schedule || [];
-    renderSchedule();
-
-    // Chart
-    loadPreview();
+    // Schedule — only replace on first load or explicit reload to avoid
+    // destroying the DOM while the user is editing sliders
+    if (firstLoad) {
+      scheduleData = s.schedule || [];
+      renderSchedule();
+      loadPreview();
+      firstLoad = false;
+    }
   } catch (e) {
     document.getElementById('statusText').textContent = 'offline';
     document.getElementById('statusDot').className = 'status-dot disconnected';
+  }
+}
+
+// ---- Force reload from server (clears unsaved changes) ----
+async function forceReload() {
+  try {
+    const res = await fetch(`${API}/api/state`);
+    const s = await res.json();
+    safeSetValue('cfgIp',         s.controller_ip || '');
+    safeSetValue('cfgTransition', s.transition_minutes);
+    safeSetValue('cfgInterval',   s.update_interval_seconds);
+    scheduleData = s.schedule || [];
+    renderSchedule();
+    loadPreview();
+    clearDirty();
+    showToast('Dados recarregados', 'success');
+  } catch (e) {
+    showToast('Erro ao recarregar', 'error');
   }
 }
 
@@ -565,14 +636,15 @@ function renderSchedule() {
     const row = document.createElement('div');
     row.className = 'schedule-row';
     row.innerHTML = `
-      <input type="time" value="${item.time}" onchange="scheduleData[${i}].time=this.value; loadPreviewDebounced()">
+      <input type="time" value="${item.time}"
+        onchange="scheduleData[${i}].time=this.value; markDirty(); loadPreviewDebounced()">
       <div class="slider-cell">
         <div class="slider-header">
           <span class="slider-label">🔵 Azul</span>
           <span class="slider-val" id="sv-b-${i}">${item.blue}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.blue}"
-          oninput="scheduleData[${i}].blue=+this.value; document.getElementById('sv-b-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+          oninput="scheduleData[${i}].blue=+this.value; document.getElementById('sv-b-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
       </div>
       <div class="slider-cell">
         <div class="slider-header">
@@ -580,7 +652,7 @@ function renderSchedule() {
           <span class="slider-val" id="sv-w-${i}">${item.white}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.white}" class="white-slider"
-          oninput="scheduleData[${i}].white=+this.value; document.getElementById('sv-w-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+          oninput="scheduleData[${i}].white=+this.value; document.getElementById('sv-w-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
       </div>
       <div class="slider-cell">
         <div class="slider-header">
@@ -588,10 +660,10 @@ function renderSchedule() {
           <span class="slider-val" id="sv-u-${i}">${item.uv}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.uv}" class="uv-slider"
-          oninput="scheduleData[${i}].uv=+this.value; document.getElementById('sv-u-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+          oninput="scheduleData[${i}].uv=+this.value; document.getElementById('sv-u-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
       </div>
       <input type="text" class="schedule-label-input" value="${item.label || ''}" placeholder="Rótulo"
-        onchange="scheduleData[${i}].label=this.value">
+        onchange="scheduleData[${i}].label=this.value; markDirty()">
       <button class="btn-icon" onclick="removeRow(${i})">✕</button>
     `;
     list.appendChild(row);
@@ -601,12 +673,14 @@ function renderSchedule() {
 function addRow() {
   scheduleData.push({ time: "12:00", blue: 50, white: 50, uv: 50, label: "" });
   renderSchedule();
+  markDirty();
   loadPreviewDebounced();
 }
 
 function removeRow(i) {
   scheduleData.splice(i, 1);
   renderSchedule();
+  markDirty();
   loadPreviewDebounced();
 }
 
@@ -626,10 +700,11 @@ async function saveConfig() {
     });
     const data = await res.json();
     if (data.ok) {
+      clearDirty();
       showToast('Configuração salva!', 'success');
       loadPreview();
     } else {
-      showToast('Erro ao salvar', 'error');
+      showToast(`Erro: ${data.error || 'falha ao salvar'}`, 'error');
     }
   } catch (e) {
     showToast('Erro de conexão', 'error');
@@ -640,84 +715,127 @@ async function reconnect() {
   try {
     const res = await fetch(`${API}/api/reconnect`, { method: 'POST' });
     const data = await res.json();
-    showToast(data.ok ? 'Reconectado!' : 'Falha ao reconectar', data.ok ? 'success' : 'error');
-    loadState();
+    showToast(data.ok ? 'Reconectando...' : 'Falha ao reconectar', data.ok ? 'success' : 'error');
+    setTimeout(loadState, 1500);
   } catch (e) {
     showToast('Erro de conexão', 'error');
   }
 }
 
 // ---- Chart ----
+
+// Custom Chart.js plugin that draws a vertical line at the current time
+const nowLinePlugin = {
+  id: 'nowLine',
+  afterDraw(chart) {
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const idx = Math.floor(nowMin / 2);
+    const meta = chart.getDatasetMeta(0);
+    if (!meta.data[idx]) return;
+
+    const x = meta.data[idx].x;
+    const { top, bottom } = chart.scales.y;
+    const ctx = chart.ctx;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Time label above the line
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${hh}:${mm}`, x, top - 5);
+    ctx.restore();
+  }
+};
+
 async function loadPreview() {
   try {
     const res = await fetch(`${API}/api/preview`);
     const data = await res.json();
     renderChart(data);
   } catch (e) {
-    // If API not available, compute locally
     renderChartLocal();
   }
 }
 
 function renderChartLocal() {
   const trans = +document.getElementById('cfgTransition').value || 30;
-  const schedule = [...scheduleData].sort((a,b) => a.time.localeCompare(b.time));
+  const schedule = [...scheduleData].sort((a, b) => a.time.localeCompare(b.time));
   const data = [];
 
   for (let m = 0; m < 1440; m += 2) {
     const target = computeAt(m, schedule, trans);
     data.push({
       minute: m,
-      time: `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`,
+      time: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`,
       ...target
     });
   }
   renderChart(data);
 }
 
+// Mirror of server-side interpolate_schedule — used only as local fallback
+// when the API is unreachable. Keep in sync with controller.py if the
+// interpolation logic ever changes.
 function computeAt(now, schedule, trans) {
   if (!schedule.length) return { blue: 0, white: 0, uv: 0 };
-  const parseT = t => { const p = t.split(':'); return +p[0]*60 + +p[1]; };
+  const parseT = t => { const p = t.split(':'); return +p[0] * 60 + +p[1]; };
   const first = parseT(schedule[0].time);
-  const last = parseT(schedule[schedule.length-1].time);
+  const last  = parseT(schedule[schedule.length - 1].time);
 
   if (now < first - trans) return { blue: 0, white: 0, uv: 0 };
-  if (now >= last) return { blue: schedule[schedule.length-1].blue, white: schedule[schedule.length-1].white, uv: schedule[schedule.length-1].uv };
+  if (now >= last) {
+    const l = schedule[schedule.length - 1];
+    return { blue: l.blue, white: l.white, uv: l.uv };
+  }
 
   for (let i = 0; i < schedule.length; i++) {
-    const tt = parseT(schedule[i].time);
-    const prev = i > 0 ? { blue: schedule[i-1].blue, white: schedule[i-1].white, uv: schedule[i-1].uv } : { blue: 0, white: 0, uv: 0 };
+    const tt   = parseT(schedule[i].time);
+    const prev = i > 0
+      ? { blue: schedule[i-1].blue, white: schedule[i-1].white, uv: schedule[i-1].uv }
+      : { blue: 0, white: 0, uv: 0 };
     const curr = { blue: schedule[i].blue, white: schedule[i].white, uv: schedule[i].uv };
     const start = tt - trans;
     if (now < tt) {
       if (now >= start) {
         const p = trans > 0 ? (now - start) / trans : 1;
         const s = (1 - Math.cos(p * Math.PI)) / 2;
-        return { blue: prev.blue + (curr.blue - prev.blue)*s, white: prev.white + (curr.white - prev.white)*s, uv: prev.uv + (curr.uv - prev.uv)*s };
+        return {
+          blue:  prev.blue  + (curr.blue  - prev.blue)  * s,
+          white: prev.white + (curr.white - prev.white) * s,
+          uv:    prev.uv    + (curr.uv    - prev.uv)    * s
+        };
       }
       return prev;
     }
   }
-  const l = schedule[schedule.length-1];
+  const l = schedule[schedule.length - 1];
   return { blue: l.blue, white: l.white, uv: l.uv };
 }
 
 function renderChart(data) {
   const ctx = document.getElementById('chart').getContext('2d');
-  const labels = data.map(d => d.time);
-  const blueData = data.map(d => d.blue);
+  const labels    = data.map(d => d.time);
+  const blueData  = data.map(d => d.blue);
   const whiteData = data.map(d => d.white);
-  const uvData = data.map(d => d.uv);
-
-  // Current time marker
-  const now = new Date();
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  const nowIdx = Math.floor(nowMin / 2);
+  const uvData    = data.map(d => d.uv);
 
   if (chart) chart.destroy();
 
   chart = new Chart(ctx, {
     type: 'line',
+    plugins: [nowLinePlugin],
     data: {
       labels,
       datasets: [
@@ -726,30 +844,21 @@ function renderChart(data) {
           data: blueData,
           borderColor: '#3b82f6',
           backgroundColor: 'rgba(59,130,246,0.08)',
-          fill: true,
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.3
+          fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3
         },
         {
           label: 'Branco',
           data: whiteData,
           borderColor: '#e0e7ff',
           backgroundColor: 'rgba(224,231,255,0.06)',
-          fill: true,
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.3
+          fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3
         },
         {
           label: 'UV',
           data: uvData,
           borderColor: '#a855f7',
           backgroundColor: 'rgba(168,85,247,0.06)',
-          fill: true,
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.3
+          fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3
         }
       ]
     },
@@ -764,9 +873,7 @@ function renderChart(data) {
           labels: {
             color: '#8494b0',
             font: { family: 'Outfit', size: 11 },
-            boxWidth: 12,
-            boxHeight: 2,
-            padding: 16
+            boxWidth: 12, boxHeight: 2, padding: 16
           }
         },
         tooltip: {
@@ -776,13 +883,12 @@ function renderChart(data) {
           titleColor: '#e2e8f0',
           bodyColor: '#8494b0',
           titleFont: { family: 'JetBrains Mono', size: 12 },
-          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          bodyFont:  { family: 'JetBrains Mono', size: 11 },
           padding: 10,
           callbacks: {
             label: ctx => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)}%`
           }
-        },
-        annotation: undefined
+        }
       },
       scales: {
         x: {
@@ -792,7 +898,9 @@ function renderChart(data) {
             maxTicksLimit: 13,
             callback: (val, idx) => {
               const m = idx * 2;
-              return m % 120 === 0 ? `${String(Math.floor(m/60)).padStart(2,'0')}:00` : '';
+              return m % 120 === 0
+                ? `${String(Math.floor(m / 60)).padStart(2, '0')}:00`
+                : '';
             }
           },
           grid: { color: 'rgba(37,48,72,0.5)', drawBorder: false }
@@ -827,11 +935,14 @@ function showToast(msg, type) {
   setTimeout(() => el.classList.remove('show'), 3000);
 }
 
-// ---- Clock ----
+// ---- Clock (local, updates every second) ----
 function updateClock() {
   const now = new Date();
   document.getElementById('currentTime').textContent =
     now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  // Redraw chart every minute to keep the now-line position accurate
+  if (now.getSeconds() === 0 && chart) chart.draw();
 }
 
 // ---- Init ----
