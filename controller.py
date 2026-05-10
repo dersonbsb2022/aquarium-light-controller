@@ -271,6 +271,9 @@ class AquariumController:
         self.last_log_at = 0.0            # rate-limit periodic value logging to ~1/min
         self.in_sync = True               # last verification matched expected state
         self._we_turned_off = True        # tracks whether WE sent turnOff last
+        self.drift_events_count = 0       # cumulative count of drift detections
+        self.last_drift_at = None         # epoch of most recent drift event
+        self.last_drift_reason = None     # short text describing last drift
         self.status = "initializing"
         self.last_error = None
         self.lock = threading.Lock()
@@ -388,17 +391,24 @@ class AquariumController:
             self.actual_levels = {"blue": 0.0, "white": 0.0, "uv": 0.0}
         elif not is_on and not self._we_turned_off:
             # Bulb reports off but we believe we turned it on.
-            # Could be a transient firmware read or a real power loss.
-            # Log it for diagnostics but treat conservatively: mark out-of-sync
-            # so we reapply — but do NOT update actual_levels to all-zero here,
-            # as that could cause a false "all zero" turnOff in _apply_levels.
+            # Could be a transient firmware read OR a real power loss.
+            # We can't reliably distinguish in a single read, so we treat
+            # conservatively: force a full turnOn() + setRgb() on the next
+            # apply cycle. This guarantees the bulb is restored to the right
+            # state if power was lost. The cost is a brief 0.3s flash if it
+            # was actually a transient false reading — an acceptable trade-off
+            # vs leaving the tank dark for hours.
             log.warning(
-                "Bulb reports off but we last sent a non-zero value — "
-                "possible transient read or power loss; will reapply"
+                "Bulb reports off but expected non-zero — assuming power loss "
+                "or transient; will force turnOn+setRgb on next apply"
             )
             self.actual_levels = {"blue": 0.0, "white": 0.0, "uv": 0.0}
             self.last_verified_at = time.time()
             self.in_sync = False
+            self._we_turned_off = True  # critical: forces turnOn() in _apply_levels
+            self.drift_events_count += 1
+            self.last_drift_at = time.time()
+            self.last_drift_reason = "bulb reported off but expected on"
             return True
         else:
             cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
@@ -441,6 +451,9 @@ class AquariumController:
                 {k: round(v, 1) for k, v in expected.items()},
                 self.actual_levels,
             )
+            self.drift_events_count += 1
+            self.last_drift_at = time.time()
+            self.last_drift_reason = "RGB values diverged from expected"
         self.in_sync = in_sync
         return True
 
@@ -571,6 +584,9 @@ class AquariumController:
             "next_anchor": next_anchor,
             "last_verified_at": self.last_verified_at if self.last_verified_at else None,
             "last_applied_at": self.last_applied_at if self.last_applied_at else None,
+            "drift_events_count": self.drift_events_count,
+            "last_drift_at": self.last_drift_at,
+            "last_drift_reason": self.last_drift_reason,
             "controller_ip": self.config.get("controller_ip"),
             "transition_minutes": self.config.get("transition_minutes", 30),
             "update_interval_seconds": self.config.get("update_interval_seconds", 10),
