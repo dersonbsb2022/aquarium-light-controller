@@ -28,6 +28,16 @@ CONFIG_PATH = os.environ.get("CONFIG_PATH", "/data/config.json")
 WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
 API_PORT = int(os.environ.get("API_PORT", "8081"))
 
+BUILD_SHA = os.environ.get("BUILD_SHA", "dev")
+BUILD_VERSION = os.environ.get("BUILD_VERSION", "local")
+BUILD_DATE = os.environ.get("BUILD_DATE", "unknown")
+BUILD_INFO = {
+    "sha": BUILD_SHA,
+    "short_sha": BUILD_SHA[:7] if BUILD_SHA != "dev" else "dev",
+    "version": BUILD_VERSION,
+    "date": BUILD_DATE,
+}
+
 DEFAULT_CONFIG = {
     "controller_ip": "192.168.1.100",
     "transition_minutes": 30,
@@ -341,7 +351,8 @@ class AquariumController:
             "transition_minutes": self.config.get("transition_minutes", 30),
             "update_interval_seconds": self.config.get("update_interval_seconds", 10),
             "schedule": schedule,
-            "last_error": self.last_error
+            "last_error": self.last_error,
+            "build": BUILD_INFO,
         }
 
     def update_config(self, new_config: dict):
@@ -381,6 +392,8 @@ class APIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/state":
             self._send_json(controller.get_state())
+        elif self.path == "/api/version":
+            self._send_json(BUILD_INFO)
         elif self.path == "/api/config":
             self._send_json(controller.config)
         elif self.path == "/api/preview":
@@ -438,6 +451,11 @@ class WebHandler(SimpleHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def main():
+    log.info(
+        "Build: version=%s sha=%s date=%s",
+        BUILD_INFO["version"], BUILD_INFO["short_sha"], BUILD_INFO["date"],
+    )
+
     ctrl_thread = threading.Thread(target=controller.run, daemon=True)
     ctrl_thread.start()
 

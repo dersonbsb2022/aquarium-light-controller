@@ -104,6 +104,34 @@
   .status-dot.reconnecting  { background: var(--amber);  }
   .status-dot.initializing  { background: var(--amber); }
 
+  .version-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(59,130,246,0.08);
+    border: 1px solid rgba(59,130,246,0.25);
+    color: var(--blue);
+    cursor: help;
+    transition: all 0.15s;
+  }
+
+  .version-badge:hover {
+    background: rgba(59,130,246,0.15);
+    border-color: rgba(59,130,246,0.4);
+  }
+
+  .header-status {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
@@ -215,7 +243,7 @@
 
   .schedule-row {
     display: grid;
-    grid-template-columns: 80px 1fr 1fr 1fr auto auto;
+    grid-template-columns: 110px 1fr 1fr 1fr minmax(120px, 1.4fr) auto;
     gap: 10px;
     align-items: center;
     padding: 12px 14px;
@@ -225,8 +253,11 @@
     transition: border-color 0.2s;
   }
 
-  .schedule-row:hover {
-    border-color: var(--blue);
+  .schedule-row:hover { border-color: var(--blue); }
+
+  .schedule-row.dirty {
+    border-color: var(--amber);
+    background: rgba(245,158,11,0.04);
   }
 
   .schedule-row input[type="time"] {
@@ -238,7 +269,31 @@
     border-radius: 6px;
     color: var(--text);
     width: 100%;
+    min-width: 0;
   }
+
+  .schedule-row input[type="time"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+    cursor: pointer;
+  }
+
+  .row-actions {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .btn-icon.btn-save {
+    color: var(--green);
+    display: none;
+  }
+
+  .btn-icon.btn-save:hover {
+    background: rgba(34,197,94,0.12);
+    color: var(--green);
+  }
+
+  .schedule-row.dirty .btn-icon.btn-save { display: inline-flex; }
 
   .schedule-row input[type="range"] {
     width: 100%;
@@ -432,7 +487,7 @@
   /* Responsive */
   @media (max-width: 640px) {
     .schedule-row {
-      grid-template-columns: 70px 1fr 1fr 1fr auto;
+      grid-template-columns: 95px 1fr 1fr 1fr auto;
       gap: 8px;
       padding: 10px;
     }
@@ -449,9 +504,14 @@
   <!-- Header -->
   <div class="header">
     <h1><span class="icon">🐠</span> Aquarium Light</h1>
-    <div class="status-badge">
-      <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">conectando...</span>
+    <div class="header-status">
+      <div class="status-badge">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">conectando...</span>
+      </div>
+      <div class="version-badge" id="versionBadge" title="Build em execução">
+        <span>⚙</span><span id="versionText">…</span>
+      </div>
     </div>
   </div>
 
@@ -553,6 +613,18 @@ function safeSetValue(id, value) {
   }
 }
 
+// ---- Version badge ----
+function updateVersionBadge(build) {
+  if (!build) return;
+  const el = document.getElementById('versionText');
+  const badge = document.getElementById('versionBadge');
+  const label = build.short_sha === 'dev'
+    ? 'dev'
+    : `v${build.version} · ${build.short_sha}`;
+  el.textContent = label;
+  badge.title = `Build ${build.version} · ${build.short_sha}\n${build.date}`;
+}
+
 // ---- State polling ----
 async function loadState() {
   try {
@@ -568,6 +640,9 @@ async function loadState() {
       : s.status === 'reconnecting' ? ' reconnecting'
       : ' initializing';
     dot.className = 'status-dot' + dotClass;
+
+    // Build/version info
+    if (s.build) updateVersionBadge(s.build);
 
     // Time comes from local clock (updated every second); server time is only
     // used as a fallback on the very first load to avoid a blank display.
@@ -629,22 +704,28 @@ async function forceReload() {
 }
 
 // ---- Schedule rendering ----
+function markRowDirty(rowEl) {
+  if (rowEl) rowEl.classList.add('dirty');
+  markDirty();
+}
+
 function renderSchedule() {
   const list = document.getElementById('scheduleList');
   list.innerHTML = '';
   scheduleData.forEach((item, i) => {
     const row = document.createElement('div');
     row.className = 'schedule-row';
+    row.dataset.idx = i;
     row.innerHTML = `
       <input type="time" value="${item.time}"
-        onchange="scheduleData[${i}].time=this.value; markDirty(); loadPreviewDebounced()">
+        onchange="scheduleData[${i}].time=this.value; markRowDirty(this.closest('.schedule-row')); loadPreviewDebounced()">
       <div class="slider-cell">
         <div class="slider-header">
           <span class="slider-label">🔵 Azul</span>
           <span class="slider-val" id="sv-b-${i}">${item.blue}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.blue}"
-          oninput="scheduleData[${i}].blue=+this.value; document.getElementById('sv-b-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
+          oninput="scheduleData[${i}].blue=+this.value; document.getElementById('sv-b-${i}').textContent=this.value+'%'; markRowDirty(this.closest('.schedule-row')); loadPreviewDebounced()">
       </div>
       <div class="slider-cell">
         <div class="slider-header">
@@ -652,7 +733,7 @@ function renderSchedule() {
           <span class="slider-val" id="sv-w-${i}">${item.white}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.white}" class="white-slider"
-          oninput="scheduleData[${i}].white=+this.value; document.getElementById('sv-w-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
+          oninput="scheduleData[${i}].white=+this.value; document.getElementById('sv-w-${i}').textContent=this.value+'%'; markRowDirty(this.closest('.schedule-row')); loadPreviewDebounced()">
       </div>
       <div class="slider-cell">
         <div class="slider-header">
@@ -660,11 +741,14 @@ function renderSchedule() {
           <span class="slider-val" id="sv-u-${i}">${item.uv}%</span>
         </div>
         <input type="range" min="0" max="100" value="${item.uv}" class="uv-slider"
-          oninput="scheduleData[${i}].uv=+this.value; document.getElementById('sv-u-${i}').textContent=this.value+'%'; markDirty(); loadPreviewDebounced()">
+          oninput="scheduleData[${i}].uv=+this.value; document.getElementById('sv-u-${i}').textContent=this.value+'%'; markRowDirty(this.closest('.schedule-row')); loadPreviewDebounced()">
       </div>
       <input type="text" class="schedule-label-input" value="${item.label || ''}" placeholder="Rótulo"
-        onchange="scheduleData[${i}].label=this.value; markDirty()">
-      <button class="btn-icon" onclick="removeRow(${i})">✕</button>
+        onchange="scheduleData[${i}].label=this.value; markRowDirty(this.closest('.schedule-row'))">
+      <div class="row-actions">
+        <button class="btn-icon btn-save" title="Salvar alterações desta linha" onclick="saveConfig()">✅</button>
+        <button class="btn-icon" title="Remover" onclick="removeRow(${i})">✕</button>
+      </div>
     `;
     list.appendChild(row);
   });
@@ -673,6 +757,10 @@ function renderSchedule() {
 function addRow() {
   scheduleData.push({ time: "12:00", blue: 50, white: 50, uv: 50, label: "" });
   renderSchedule();
+  // The freshly added row is dirty by definition
+  const list = document.getElementById('scheduleList');
+  const last = list.lastElementChild;
+  if (last) last.classList.add('dirty');
   markDirty();
   loadPreviewDebounced();
 }
@@ -682,6 +770,10 @@ function removeRow(i) {
   renderSchedule();
   markDirty();
   loadPreviewDebounced();
+}
+
+function clearAllRowDirty() {
+  document.querySelectorAll('.schedule-row.dirty').forEach(r => r.classList.remove('dirty'));
 }
 
 // ---- Save config ----
@@ -701,6 +793,7 @@ async function saveConfig() {
     const data = await res.json();
     if (data.ok) {
       clearDirty();
+      clearAllRowDirty();
       showToast('Configuração salva!', 'success');
       loadPreview();
     } else {
