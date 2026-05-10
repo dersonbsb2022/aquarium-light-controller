@@ -204,6 +204,36 @@
   .level-item.white .level-value { color: var(--white-ch); }
   .level-item.uv    .level-value { color: var(--uv); }
 
+  /* Verification status row */
+  .verify-row {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+  }
+
+  .verify-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .verify-status.in-sync   { color: var(--green); }
+  .verify-status.drift     { color: var(--amber); }
+  .verify-status.unknown   { color: var(--text-dim); }
+
+  .verify-actuals {
+    color: var(--text-dim);
+    opacity: 0.85;
+  }
+
   .level-unit {
     font-size: 0.85rem;
     color: var(--text-dim);
@@ -535,6 +565,10 @@
         <div class="level-value"><span id="lvlUV">0</span><span class="level-unit">%</span></div>
       </div>
     </div>
+    <div class="verify-row">
+      <span class="verify-status unknown" id="verifyStatus">— aguardando primeira verificação</span>
+      <span class="verify-actuals" id="verifyActuals"></span>
+    </div>
   </div>
 
   <!-- Chart -->
@@ -614,6 +648,47 @@ function safeSetValue(id, value) {
   }
 }
 
+// ---- Relative time formatting ----
+function formatRelative(epochSeconds) {
+  if (!epochSeconds) return 'nunca';
+  const diffSec = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+  if (diffSec < 5)    return 'agora';
+  if (diffSec < 60)   return `há ${diffSec}s`;
+  if (diffSec < 3600) return `há ${Math.floor(diffSec / 60)}m`;
+  if (diffSec < 86400) return `há ${Math.floor(diffSec / 3600)}h`;
+  return `há ${Math.floor(diffSec / 86400)}d`;
+}
+
+// ---- Verification / sync indicator ----
+function updateVerifyStatus(s) {
+  const el = document.getElementById('verifyStatus');
+  const actualsEl = document.getElementById('verifyActuals');
+
+  if (!s.last_verified_at) {
+    el.className = 'verify-status unknown';
+    el.textContent = '◌ aguardando primeira verificação';
+    actualsEl.textContent = '';
+    return;
+  }
+
+  const when = formatRelative(s.last_verified_at);
+  if (s.in_sync) {
+    el.className = 'verify-status in-sync';
+    el.textContent = `✓ sincronizado · verificado ${when}`;
+  } else {
+    el.className = 'verify-status drift';
+    el.textContent = `⚠ drift detectado · verificado ${when}`;
+  }
+
+  if (s.actual_levels) {
+    const a = s.actual_levels;
+    actualsEl.textContent =
+      `real: B ${Math.round(a.blue)}% · W ${Math.round(a.white)}% · UV ${Math.round(a.uv)}%`;
+  } else {
+    actualsEl.textContent = '';
+  }
+}
+
 // ---- Version badge ----
 function updateVersionBadge(build) {
   if (!build) return;
@@ -644,6 +719,9 @@ async function loadState() {
 
     // Build/version info
     if (s.build) updateVersionBadge(s.build);
+
+    // Reconciliation status (real bulb reading vs expected)
+    updateVerifyStatus(s);
 
     // Time comes from local clock (updated every second); server time is only
     // used as a fallback on the very first load to avoid a blank display.

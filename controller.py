@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
     "controller_ip": "192.168.1.100",
     "transition_minutes": 60,
     "update_interval_seconds": 10,
+    "verification_interval_seconds": 300,
+    "drift_tolerance_percent": 2,
     "channel_map": {
         "blue": "R",
         "white": "G",
@@ -186,6 +188,16 @@ def validate_config(cfg: dict) -> list:
         if not isinstance(u, (int, float)) or u < 2 or u > 3600:
             errors.append("update_interval_seconds must be a number between 2 and 3600")
 
+    if "verification_interval_seconds" in cfg:
+        v = cfg["verification_interval_seconds"]
+        if not isinstance(v, (int, float)) or v < 30 or v > 86400:
+            errors.append("verification_interval_seconds must be a number between 30 and 86400")
+
+    if "drift_tolerance_percent" in cfg:
+        d = cfg["drift_tolerance_percent"]
+        if not isinstance(d, (int, float)) or d < 0 or d > 50:
+            errors.append("drift_tolerance_percent must be a number between 0 and 50")
+
     if "channel_map" in cfg:
         cm = cfg["channel_map"]
         if not isinstance(cm, dict):
@@ -233,6 +245,12 @@ class AquariumController:
         self.running = False
         self.current_levels = {"blue": 0, "white": 0, "uv": 0}
         self.target_levels = {"blue": 0, "white": 0, "uv": 0}
+        # Reconciliation state — what the bulb actually reports vs what we expect
+        self.actual_levels = None         # last real reading from the bulb (or None if never read)
+        self.last_applied_bytes = None    # last (R,G,B) tuple successfully sent
+        self.last_verified_at = 0.0       # epoch timestamp of last real refreshState
+        self.last_applied_at = 0.0        # epoch timestamp of last setRgb/turnOff
+        self.in_sync = True               # last verification matched expected state
         self.status = "initializing"
         self.last_error = None
         self.lock = threading.Lock()
@@ -270,16 +288,25 @@ class AquariumController:
         """Convert 0-100 percentage to 0-255 byte."""
         return max(0, min(255, int(round(pct / 100.0 * 255))))
 
+    def _byte_to_pct(self, byte: int) -> float:
+        """Convert 0-255 byte back to 0-100 percentage."""
+        return round(max(0, min(255, byte)) / 255.0 * 100.0, 1)
+
+    def _target_to_bytes(self, target: dict) -> tuple:
+        """Translate a target dict (blue/white/uv %) to a (R,G,B) byte tuple."""
+        cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
+        channels = {"R": 0, "G": 0, "B": 0}
+        channels[cmap.get("blue", "R")] = self._pct_to_byte(target["blue"])
+        channels[cmap.get("white", "G")] = self._pct_to_byte(target["white"])
+        channels[cmap.get("uv", "B")] = self._pct_to_byte(target["uv"])
+        return (channels["R"], channels["G"], channels["B"])
+
     def _apply_levels(self, blue: float, white: float, uv: float):
         """Send RGB values to the controller based on channel mapping."""
         if not self.bulb:
             return
 
-        cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
-        channels = {"R": 0, "G": 0, "B": 0}
-        channels[cmap.get("blue", "R")] = self._pct_to_byte(blue)
-        channels[cmap.get("white", "G")] = self._pct_to_byte(white)
-        channels[cmap.get("uv", "B")] = self._pct_to_byte(uv)
+        r, g, b = self._target_to_bytes({"blue": blue, "white": white, "uv": uv})
 
         try:
             all_off = blue <= 0 and white <= 0 and uv <= 0
@@ -289,15 +316,68 @@ class AquariumController:
                 if not self.bulb.isOn():
                     self.bulb.turnOn()
                     time.sleep(0.3)
-                self.bulb.setRgb(channels["R"], channels["G"], channels["B"])
+                self.bulb.setRgb(r, g, b)
 
             self.current_levels = {"blue": blue, "white": white, "uv": uv}
+            self.last_applied_bytes = (r, g, b)
+            self.last_applied_at = time.time()
             self.last_error = None
         except Exception as e:
             log.error("Error applying levels: %s", e)
             self.last_error = str(e)
             self.bulb = None
             self.status = "disconnected"
+
+    def _read_and_check(self, expected: dict) -> bool:
+        """
+        Read the actual state from the bulb and compare against expected target.
+        Updates self.actual_levels, self.last_verified_at, self.in_sync.
+        Returns True if reading succeeded (regardless of drift detection).
+        """
+        if not self.bulb:
+            return False
+
+        try:
+            self.bulb.refreshState()
+            is_on = self.bulb.isOn()
+            r, g, b = self.bulb.getRgb()
+        except Exception as e:
+            log.warning("Failed to read bulb state: %s", e)
+            self.actual_levels = None
+            self.in_sync = False
+            return False
+
+        if not is_on:
+            self.actual_levels = {"blue": 0.0, "white": 0.0, "uv": 0.0}
+        else:
+            cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
+            # Reverse channel_map: {"R": "blue", "G": "white", "B": "uv"}
+            rev = {v: k for k, v in cmap.items()}
+            byte_by_phys = {"R": r, "G": g, "B": b}
+            self.actual_levels = {
+                rev.get("R", "_"): self._byte_to_pct(byte_by_phys["R"]),
+                rev.get("G", "_"): self._byte_to_pct(byte_by_phys["G"]),
+                rev.get("B", "_"): self._byte_to_pct(byte_by_phys["B"]),
+            }
+            # Ensure all three logical channels exist
+            for ch in ("blue", "white", "uv"):
+                self.actual_levels.setdefault(ch, 0.0)
+
+        self.last_verified_at = time.time()
+
+        tolerance = self.config.get("drift_tolerance_percent", 2)
+        in_sync = all(
+            abs(self.actual_levels[ch] - expected[ch]) <= tolerance
+            for ch in ("blue", "white", "uv")
+        )
+        if not in_sync:
+            log.warning(
+                "Drift detected. Expected=%s actual=%s — reapplying",
+                {k: round(v, 1) for k, v in expected.items()},
+                self.actual_levels,
+            )
+        self.in_sync = in_sync
+        return True
 
     def _now_minutes(self) -> float:
         """Current time as minutes since midnight."""
@@ -313,7 +393,19 @@ class AquariumController:
         )
 
     def run(self):
-        """Main control loop."""
+        """
+        Main control loop with smart reconciliation.
+
+        - Computes the target for the current minute every cycle (cheap).
+        - Only sends a setRgb to the bulb when the target actually changes,
+          dramatically reducing network traffic vs naive re-apply every cycle.
+        - Periodically (every verification_interval_seconds) reads the real
+          bulb state via refreshState() and compares against expected.
+          If drift is detected, logs a warning and reapplies. This protects
+          against power loss, accidental manual changes, or controller resets.
+        - On reconnect, last_applied_bytes is reset so the next cycle always
+          re-syncs the bulb to the current target.
+        """
         self.running = True
         log.info("Controller started")
 
@@ -326,20 +418,38 @@ class AquariumController:
                     reconnect_delay = min(reconnect_delay * 2, 120)
                     continue
                 reconnect_delay = 10
+                # Force re-application after any (re)connect: the bulb may
+                # have just powered on with a stale or zeroed state.
+                self.last_applied_bytes = None
+                self.last_verified_at = 0.0
 
             target = self.compute_target()
             self.target_levels = target
+            target_bytes = self._target_to_bytes(target)
+
+            now_ts = time.time()
+            verify_interval = self.config.get("verification_interval_seconds", 300)
+            time_since_verify = now_ts - self.last_verified_at
+            should_verify = time_since_verify >= verify_interval
+            target_changed = self.last_applied_bytes != target_bytes
 
             with self.lock:
-                self._apply_levels(target["blue"], target["white"], target["uv"])
+                # Periodic real-state check — detects drift even when target hasn't moved
+                if should_verify and self.bulb:
+                    self._read_and_check(target)
 
-            interval = self.config.get("update_interval_seconds", 10)
-            # Only mark as running if the bulb is still connected after apply.
-            # _apply_levels sets status="disconnected" on error; preserving that
-            # here ensures the dashboard reflects the real state.
+                # Apply when the schedule moved the target, OR drift was just detected
+                needs_apply = target_changed or not self.in_sync
+                if needs_apply and self.bulb:
+                    self._apply_levels(target["blue"], target["white"], target["uv"])
+                    # After successful apply, optimistically mark as in sync;
+                    # next periodic check will confirm or correct.
+                    if self.bulb:
+                        self.in_sync = True
+
             if self.bulb:
                 self.status = "running"
-            time.sleep(interval)
+            time.sleep(self.config.get("update_interval_seconds", 10))
 
     def stop(self):
         self.running = False
@@ -349,14 +459,25 @@ class AquariumController:
         """Return current state for the API."""
         schedule = sorted(self.config["schedule"], key=lambda s: parse_time(s["time"]))
         now = datetime.now()
+        actual = (
+            {k: round(v, 1) for k, v in self.actual_levels.items()}
+            if self.actual_levels is not None
+            else None
+        )
         return {
             "status": self.status,
             "time": now.strftime("%H:%M:%S"),
             "current_levels": {k: round(v, 1) for k, v in self.current_levels.items()},
             "target_levels": {k: round(v, 1) for k, v in self.target_levels.items()},
+            "actual_levels": actual,
+            "in_sync": self.in_sync,
+            "last_verified_at": self.last_verified_at if self.last_verified_at else None,
+            "last_applied_at": self.last_applied_at if self.last_applied_at else None,
             "controller_ip": self.config.get("controller_ip"),
             "transition_minutes": self.config.get("transition_minutes", 30),
             "update_interval_seconds": self.config.get("update_interval_seconds", 10),
+            "verification_interval_seconds": self.config.get("verification_interval_seconds", 300),
+            "drift_tolerance_percent": self.config.get("drift_tolerance_percent", 2),
             "schedule": schedule,
             "last_error": self.last_error,
             "build": BUILD_INFO,
