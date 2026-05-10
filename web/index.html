@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aquarium Light Controller</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #253048;
+    --text: #e2e8f0;
+    --text-dim: #8494b0;
+    --blue: #3b82f6;
+    --blue-glow: rgba(59, 130, 246, 0.25);
+    --white-ch: #f0f4ff;
+    --uv: #a855f7;
+    --uv-glow: rgba(168, 85, 247, 0.25);
+    --green: #22c55e;
+    --red: #ef4444;
+    --amber: #f59e0b;
+    --radius: 12px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Outfit', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background atmosphere */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(ellipse at 30% 20%, rgba(59,130,246,0.06) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 80%, rgba(168,85,247,0.04) 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 20px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Header */
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .header h1 .icon {
+    font-size: 1.4rem;
+  }
+
+  .status-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+  }
+
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .status-dot.disconnected { background: var(--red); animation: none; }
+  .status-dot.initializing { background: var(--amber); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* Cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px;
+    margin-bottom: 18px;
+  }
+
+  .card-title {
+    font-size: 0.8rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  /* Current levels display */
+  .levels-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+
+  .level-item {
+    text-align: center;
+    padding: 16px 10px;
+    border-radius: 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .level-item::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    border-radius: 0 0 10px 10px;
+  }
+
+  .level-item.blue::after { background: var(--blue); box-shadow: 0 0 12px var(--blue-glow); }
+  .level-item.white::after { background: var(--white-ch); }
+  .level-item.uv::after { background: var(--uv); box-shadow: 0 0 12px var(--uv-glow); }
+
+  .level-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+
+  .level-value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.8rem;
+    font-weight: 600;
+  }
+
+  .level-item.blue .level-value { color: var(--blue); }
+  .level-item.white .level-value { color: var(--white-ch); }
+  .level-item.uv .level-value { color: var(--uv); }
+
+  .level-unit {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    font-weight: 400;
+  }
+
+  /* Chart */
+  .chart-container {
+    position: relative;
+    width: 100%;
+    height: 220px;
+    margin-top: 8px;
+  }
+
+  .chart-container canvas {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* Time indicator */
+  .time-now {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 2rem;
+    font-weight: 300;
+    text-align: center;
+    color: var(--text);
+    margin-bottom: 6px;
+    letter-spacing: 0.05em;
+  }
+
+  /* Schedule editor */
+  .schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .schedule-row {
+    display: grid;
+    grid-template-columns: 80px 1fr 1fr 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 12px 14px;
+    background: var(--surface2);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    transition: border-color 0.2s;
+  }
+
+  .schedule-row:hover {
+    border-color: var(--blue);
+  }
+
+  .schedule-row input[type="time"] {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    width: 100%;
+  }
+
+  .schedule-row input[type="range"] {
+    width: 100%;
+    accent-color: var(--blue);
+    cursor: pointer;
+  }
+
+  .schedule-row input[type="range"].white-slider { accent-color: var(--white-ch); }
+  .schedule-row input[type="range"].uv-slider { accent-color: var(--uv); }
+
+  .slider-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .slider-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .slider-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+  }
+
+  .slider-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    min-width: 30px;
+    text-align: right;
+  }
+
+  .schedule-label-input {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.75rem;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-dim);
+    width: 100%;
+    min-width: 100px;
+  }
+
+  .btn-icon {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    font-size: 1.1rem;
+    transition: all 0.15s;
+  }
+
+  .btn-icon:hover { color: var(--red); background: rgba(239,68,68,0.1); }
+
+  /* Buttons */
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .btn-primary {
+    background: var(--blue);
+    color: white;
+    border-color: var(--blue);
+  }
+  .btn-primary:hover { background: #2563eb; }
+
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+  }
+  .btn-secondary:hover { background: var(--border); }
+
+  .btn-add {
+    background: transparent;
+    color: var(--blue);
+    border: 1px dashed var(--border);
+    width: 100%;
+    justify-content: center;
+    padding: 10px;
+    margin-top: 6px;
+  }
+  .btn-add:hover { border-color: var(--blue); background: rgba(59,130,246,0.05); }
+
+  /* Settings */
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px;
+  }
+
+  .setting-item label {
+    display: block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  .setting-item input {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    width: 100%;
+  }
+
+  .setting-item input:focus {
+    outline: none;
+    border-color: var(--blue);
+  }
+
+  /* Toast notification */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    z-index: 999;
+    transform: translateY(80px);
+    opacity: 0;
+    transition: all 0.3s ease;
+  }
+
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast.success { background: #065f46; color: #a7f3d0; border: 1px solid #10b981; }
+  .toast.error { background: #7f1d1d; color: #fca5a5; border: 1px solid #ef4444; }
+
+  /* Error banner */
+  .error-banner {
+    background: rgba(239,68,68,0.1);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 0.8rem;
+    color: #fca5a5;
+    margin-bottom: 18px;
+    font-family: 'JetBrains Mono', monospace;
+    display: none;
+  }
+
+  /* Responsive */
+  @media (max-width: 640px) {
+    .schedule-row {
+      grid-template-columns: 70px 1fr 1fr 1fr auto;
+      gap: 8px;
+      padding: 10px;
+    }
+    .schedule-label-input { display: none; }
+    .levels-grid { gap: 8px; }
+    .level-value { font-size: 1.4rem; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <h1><span class="icon">🐠</span> Aquarium Light</h1>
+    <div class="status-badge">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">conectando...</span>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div class="error-banner" id="errorBanner"></div>
+
+  <!-- Current time & levels -->
+  <div class="card">
+    <div class="time-now" id="currentTime">--:--:--</div>
+    <div class="levels-grid">
+      <div class="level-item blue">
+        <div class="level-label">Azul</div>
+        <div class="level-value"><span id="lvlBlue">0</span><span class="level-unit">%</span></div>
+      </div>
+      <div class="level-item white">
+        <div class="level-label">Branco</div>
+        <div class="level-value"><span id="lvlWhite">0</span><span class="level-unit">%</span></div>
+      </div>
+      <div class="level-item uv">
+        <div class="level-label">UV</div>
+        <div class="level-value"><span id="lvlUV">0</span><span class="level-unit">%</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div class="card">
+    <div class="card-title">Curva de Iluminação (24h)</div>
+    <div class="chart-container">
+      <canvas id="chart"></canvas>
+    </div>
+  </div>
+
+  <!-- Schedule editor -->
+  <div class="card">
+    <div class="card-title">Agenda</div>
+    <div class="schedule-list" id="scheduleList"></div>
+    <button class="btn btn-add" onclick="addRow()">＋ Adicionar horário</button>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveConfig()">💾 Salvar</button>
+      <button class="btn btn-secondary" onclick="loadState()">↻ Recarregar</button>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="card">
+    <div class="card-title">Configurações</div>
+    <div class="settings-grid">
+      <div class="setting-item">
+        <label>IP do Controlador</label>
+        <input type="text" id="cfgIp" placeholder="192.168.1.100">
+      </div>
+      <div class="setting-item">
+        <label>Duração da transição (min)</label>
+        <input type="number" id="cfgTransition" min="1" max="120" value="30">
+      </div>
+      <div class="setting-item">
+        <label>Intervalo de atualização (seg)</label>
+        <input type="number" id="cfgInterval" min="2" max="60" value="10">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="saveConfig()">💾 Salvar</button>
+      <button class="btn btn-secondary" onclick="reconnect()">🔌 Reconectar</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Chart.js from CDN -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<script>
+const API = `${location.protocol}//${location.hostname}:8081`;
+let chart = null;
+let scheduleData = [];
+
+// ---- State polling ----
+async function loadState() {
+  try {
+    const res = await fetch(`${API}/api/state`);
+    const s = await res.json();
+
+    // Status
+    document.getElementById('statusText').textContent = s.status;
+    const dot = document.getElementById('statusDot');
+    dot.className = 'status-dot' + (s.status === 'running' ? '' : s.status === 'disconnected' ? ' disconnected' : ' initializing');
+
+    // Time
+    document.getElementById('currentTime').textContent = s.time;
+
+    // Levels
+    document.getElementById('lvlBlue').textContent = Math.round(s.current_levels.blue);
+    document.getElementById('lvlWhite').textContent = Math.round(s.current_levels.white);
+    document.getElementById('lvlUV').textContent = Math.round(s.current_levels.uv);
+
+    // Error
+    const banner = document.getElementById('errorBanner');
+    if (s.last_error) {
+      banner.textContent = `Erro: ${s.last_error}`;
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    // Settings
+    document.getElementById('cfgIp').value = s.controller_ip || '';
+    document.getElementById('cfgTransition').value = s.transition_minutes;
+    document.getElementById('cfgInterval').value = s.update_interval_seconds;
+
+    // Schedule
+    scheduleData = s.schedule || [];
+    renderSchedule();
+
+    // Chart
+    loadPreview();
+  } catch (e) {
+    document.getElementById('statusText').textContent = 'offline';
+    document.getElementById('statusDot').className = 'status-dot disconnected';
+  }
+}
+
+// ---- Schedule rendering ----
+function renderSchedule() {
+  const list = document.getElementById('scheduleList');
+  list.innerHTML = '';
+  scheduleData.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'schedule-row';
+    row.innerHTML = `
+      <input type="time" value="${item.time}" onchange="scheduleData[${i}].time=this.value; loadPreviewDebounced()">
+      <div class="slider-cell">
+        <div class="slider-header">
+          <span class="slider-label">🔵 Azul</span>
+          <span class="slider-val" id="sv-b-${i}">${item.blue}%</span>
+        </div>
+        <input type="range" min="0" max="100" value="${item.blue}"
+          oninput="scheduleData[${i}].blue=+this.value; document.getElementById('sv-b-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+      </div>
+      <div class="slider-cell">
+        <div class="slider-header">
+          <span class="slider-label">⬜ Branco</span>
+          <span class="slider-val" id="sv-w-${i}">${item.white}%</span>
+        </div>
+        <input type="range" min="0" max="100" value="${item.white}" class="white-slider"
+          oninput="scheduleData[${i}].white=+this.value; document.getElementById('sv-w-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+      </div>
+      <div class="slider-cell">
+        <div class="slider-header">
+          <span class="slider-label">🟣 UV</span>
+          <span class="slider-val" id="sv-u-${i}">${item.uv}%</span>
+        </div>
+        <input type="range" min="0" max="100" value="${item.uv}" class="uv-slider"
+          oninput="scheduleData[${i}].uv=+this.value; document.getElementById('sv-u-${i}').textContent=this.value+'%'; loadPreviewDebounced()">
+      </div>
+      <input type="text" class="schedule-label-input" value="${item.label || ''}" placeholder="Rótulo"
+        onchange="scheduleData[${i}].label=this.value">
+      <button class="btn-icon" onclick="removeRow(${i})">✕</button>
+    `;
+    list.appendChild(row);
+  });
+}
+
+function addRow() {
+  scheduleData.push({ time: "12:00", blue: 50, white: 50, uv: 50, label: "" });
+  renderSchedule();
+  loadPreviewDebounced();
+}
+
+function removeRow(i) {
+  scheduleData.splice(i, 1);
+  renderSchedule();
+  loadPreviewDebounced();
+}
+
+// ---- Save config ----
+async function saveConfig() {
+  const body = {
+    controller_ip: document.getElementById('cfgIp').value,
+    transition_minutes: +document.getElementById('cfgTransition').value,
+    update_interval_seconds: +document.getElementById('cfgInterval').value,
+    schedule: scheduleData
+  };
+  try {
+    const res = await fetch(`${API}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showToast('Configuração salva!', 'success');
+      loadPreview();
+    } else {
+      showToast('Erro ao salvar', 'error');
+    }
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+  }
+}
+
+async function reconnect() {
+  try {
+    const res = await fetch(`${API}/api/reconnect`, { method: 'POST' });
+    const data = await res.json();
+    showToast(data.ok ? 'Reconectado!' : 'Falha ao reconectar', data.ok ? 'success' : 'error');
+    loadState();
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+  }
+}
+
+// ---- Chart ----
+async function loadPreview() {
+  try {
+    const res = await fetch(`${API}/api/preview`);
+    const data = await res.json();
+    renderChart(data);
+  } catch (e) {
+    // If API not available, compute locally
+    renderChartLocal();
+  }
+}
+
+function renderChartLocal() {
+  const trans = +document.getElementById('cfgTransition').value || 30;
+  const schedule = [...scheduleData].sort((a,b) => a.time.localeCompare(b.time));
+  const data = [];
+
+  for (let m = 0; m < 1440; m += 2) {
+    const target = computeAt(m, schedule, trans);
+    data.push({
+      minute: m,
+      time: `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`,
+      ...target
+    });
+  }
+  renderChart(data);
+}
+
+function computeAt(now, schedule, trans) {
+  if (!schedule.length) return { blue: 0, white: 0, uv: 0 };
+  const parseT = t => { const p = t.split(':'); return +p[0]*60 + +p[1]; };
+  const first = parseT(schedule[0].time);
+  const last = parseT(schedule[schedule.length-1].time);
+
+  if (now < first - trans) return { blue: 0, white: 0, uv: 0 };
+  if (now >= last) return { blue: schedule[schedule.length-1].blue, white: schedule[schedule.length-1].white, uv: schedule[schedule.length-1].uv };
+
+  for (let i = 0; i < schedule.length; i++) {
+    const tt = parseT(schedule[i].time);
+    const prev = i > 0 ? { blue: schedule[i-1].blue, white: schedule[i-1].white, uv: schedule[i-1].uv } : { blue: 0, white: 0, uv: 0 };
+    const curr = { blue: schedule[i].blue, white: schedule[i].white, uv: schedule[i].uv };
+    const start = tt - trans;
+    if (now < tt) {
+      if (now >= start) {
+        const p = trans > 0 ? (now - start) / trans : 1;
+        const s = (1 - Math.cos(p * Math.PI)) / 2;
+        return { blue: prev.blue + (curr.blue - prev.blue)*s, white: prev.white + (curr.white - prev.white)*s, uv: prev.uv + (curr.uv - prev.uv)*s };
+      }
+      return prev;
+    }
+  }
+  const l = schedule[schedule.length-1];
+  return { blue: l.blue, white: l.white, uv: l.uv };
+}
+
+function renderChart(data) {
+  const ctx = document.getElementById('chart').getContext('2d');
+  const labels = data.map(d => d.time);
+  const blueData = data.map(d => d.blue);
+  const whiteData = data.map(d => d.white);
+  const uvData = data.map(d => d.uv);
+
+  // Current time marker
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const nowIdx = Math.floor(nowMin / 2);
+
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Azul',
+          data: blueData,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.08)',
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3
+        },
+        {
+          label: 'Branco',
+          data: whiteData,
+          borderColor: '#e0e7ff',
+          backgroundColor: 'rgba(224,231,255,0.06)',
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3
+        },
+        {
+          label: 'UV',
+          data: uvData,
+          borderColor: '#a855f7',
+          backgroundColor: 'rgba(168,85,247,0.06)',
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          labels: {
+            color: '#8494b0',
+            font: { family: 'Outfit', size: 11 },
+            boxWidth: 12,
+            boxHeight: 2,
+            padding: 16
+          }
+        },
+        tooltip: {
+          backgroundColor: '#1a2235',
+          borderColor: '#253048',
+          borderWidth: 1,
+          titleColor: '#e2e8f0',
+          bodyColor: '#8494b0',
+          titleFont: { family: 'JetBrains Mono', size: 12 },
+          bodyFont: { family: 'JetBrains Mono', size: 11 },
+          padding: 10,
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y)}%`
+          }
+        },
+        annotation: undefined
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: '#8494b0',
+            font: { family: 'JetBrains Mono', size: 10 },
+            maxTicksLimit: 13,
+            callback: (val, idx) => {
+              const m = idx * 2;
+              return m % 120 === 0 ? `${String(Math.floor(m/60)).padStart(2,'0')}:00` : '';
+            }
+          },
+          grid: { color: 'rgba(37,48,72,0.5)', drawBorder: false }
+        },
+        y: {
+          min: 0, max: 105,
+          ticks: {
+            color: '#8494b0',
+            font: { family: 'JetBrains Mono', size: 10 },
+            stepSize: 25,
+            callback: v => v + '%'
+          },
+          grid: { color: 'rgba(37,48,72,0.5)', drawBorder: false }
+        }
+      }
+    }
+  });
+}
+
+// ---- Debounce for live preview ----
+let previewTimer = null;
+function loadPreviewDebounced() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(renderChartLocal, 200);
+}
+
+// ---- Toast ----
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast ${type} show`;
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ---- Clock ----
+function updateClock() {
+  const now = new Date();
+  document.getElementById('currentTime').textContent =
+    now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+// ---- Init ----
+loadState();
+setInterval(loadState, 5000);
+setInterval(updateClock, 1000);
+</script>
+
+</body>
+</html>
