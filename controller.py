@@ -44,10 +44,24 @@ DEFAULT_CONFIG = {
     "update_interval_seconds": 10,
     "verification_interval_seconds": 300,
     "drift_tolerance_percent": 2,
+    # Physical wiring of the user's fixture (16 blue + 4 white + 4 UV):
+    #   pin R → 4 UV LEDs
+    #   pin G → 4 white LEDs
+    #   pin B → 16 blue LEDs
+    # Verified empirically via /api/test on 2026-05-10.
     "channel_map": {
-        "blue": "R",
+        "blue": "B",
         "white": "G",
-        "uv": "B"
+        "uv": "R"
+    },
+    # Hardware calibration: the Magic Home PWM driver has a dead zone for
+    # bytes < 6 — LEDs do not light at all in that range. min_byte=6 ensures
+    # any non-zero schedule percentage produces visible output. Linear gamma
+    # (1.0) keeps the percentage-to-byte mapping intuitive (50% ≈ half byte).
+    "channel_curves": {
+        "blue":  {"min_byte": 6, "max_byte": 255, "gamma": 1.0},
+        "white": {"min_byte": 6, "max_byte": 255, "gamma": 1.0},
+        "uv":    {"min_byte": 6, "max_byte": 255, "gamma": 1.0}
     },
     # Reef-style sun cycle for a 16 blue / 4 white / 4 UV fixture.
     # Blue dominates throughout (water filters warm wavelengths in nature).
@@ -751,12 +765,87 @@ class APIHandler(SimpleHTTPRequestHandler):
             self._send_json({"ok": True, "status": controller.status})
         elif self.path == "/api/test":
             self._handle_test()
+        elif self.path == "/api/test/channel":
+            self._handle_test_channel()
         elif self.path == "/api/test/cancel":
             controller.test_mode_until = 0.0
             controller.last_applied_bytes = None
             self._send_json({"ok": True, "message": "test mode cancelled"})
         else:
             self._send_json({"error": "not found"}, 404)
+
+    def _handle_test_channel(self):
+        """
+        Friendly test endpoint that takes logical channel names (blue/white/uv)
+        and percentages, and uses the current channel_map to translate to the
+        physical RGB pins. Useful for ongoing tests once channel_map is known
+        to be correct.
+
+        Body:
+          {"channel": "blue", "pct": 50, "hold_seconds": 30}
+          {"channel": "white", "pct": 10}
+          {"channel": "uv", "pct": 5}
+        """
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            channel = str(body.get("channel", "")).lower()
+            pct = float(body.get("pct", 0))
+            hold_s = float(body.get("hold_seconds", 30))
+            if channel not in ("blue", "white", "uv"):
+                self._send_json({"error": "channel must be blue, white or uv"}, 400)
+                return
+            if not (0 <= pct <= 100):
+                self._send_json({"error": "pct must be 0-100"}, 400)
+                return
+            if not (1 <= hold_s <= 600):
+                self._send_json({"error": "hold_seconds must be 1-600"}, 400)
+                return
+        except Exception as e:
+            self._send_json({"error": f"bad request: {e}"}, 400)
+            return
+
+        # Translate logical channel + pct to physical RGB bytes via current
+        # channel_map and channel_curves (calibrated). All other channels = 0.
+        target = {"blue": 0.0, "white": 0.0, "uv": 0.0}
+        target[channel] = pct
+        r, g, b = controller._target_to_bytes(target)
+
+        with controller.lock:
+            if not controller.bulb:
+                self._send_json({"error": "bulb not connected"}, 503)
+                return
+            try:
+                if r == 0 and g == 0 and b == 0:
+                    controller.bulb.turnOff()
+                    controller._we_turned_off = True
+                else:
+                    if controller._we_turned_off:
+                        controller.bulb.turnOn()
+                        time.sleep(0.3)
+                        controller._we_turned_off = False
+                    controller.bulb.setRgb(r, g, b)
+                controller.test_mode_until = time.time() + hold_s
+                controller.last_applied_bytes = (r, g, b)
+                cmap = controller.config.get(
+                    "channel_map", {"blue": "R", "white": "G", "uv": "B"}
+                )
+                physical_pin = cmap.get(channel, "?")
+                log.info(
+                    "TEST channel=%s pct=%.1f%% → pin %s, RGB=(%d,%d,%d) hold=%.1fs",
+                    channel, pct, physical_pin, r, g, b, hold_s,
+                )
+                self._send_json({
+                    "ok": True,
+                    "channel": channel,
+                    "pct": pct,
+                    "physical_pin": physical_pin,
+                    "rgb_sent": {"r": r, "g": g, "b": b},
+                    "hold_seconds": hold_s,
+                    "until": controller.test_mode_until,
+                })
+            except Exception as e:
+                self._send_json({"error": f"failed: {e}"}, 500)
 
     def _handle_test(self):
         """
