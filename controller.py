@@ -270,6 +270,7 @@ class AquariumController:
         self.last_applied_at = 0.0        # epoch timestamp of last setRgb/turnOff
         self.last_log_at = 0.0            # rate-limit periodic value logging to ~1/min
         self.in_sync = True               # last verification matched expected state
+        self._we_turned_off = True        # tracks whether WE sent turnOff last
         self.status = "initializing"
         self.last_error = None
         self.lock = threading.Lock()
@@ -331,10 +332,16 @@ class AquariumController:
             all_off = blue <= 0 and white <= 0 and uv <= 0
             if all_off:
                 self.bulb.turnOff()
+                self._we_turned_off = True
             else:
-                if not self.bulb.isOn():
+                # Only call turnOn() when WE previously sent a turnOff command.
+                # Never rely on isOn() from a cached refreshState() read — that
+                # state can be transiently wrong and causes the bulb to briefly
+                # go dark when turnOn() is called unnecessarily.
+                if self._we_turned_off:
                     self.bulb.turnOn()
                     time.sleep(0.3)
+                    self._we_turned_off = False
                 self.bulb.setRgb(r, g, b)
 
             self.current_levels = {"blue": blue, "white": white, "uv": uv}
@@ -376,8 +383,23 @@ class AquariumController:
             self.in_sync = False
             return False
 
-        if not is_on:
+        if not is_on and self._we_turned_off:
+            # We intentionally turned off — this is expected, not drift.
             self.actual_levels = {"blue": 0.0, "white": 0.0, "uv": 0.0}
+        elif not is_on and not self._we_turned_off:
+            # Bulb reports off but we believe we turned it on.
+            # Could be a transient firmware read or a real power loss.
+            # Log it for diagnostics but treat conservatively: mark out-of-sync
+            # so we reapply — but do NOT update actual_levels to all-zero here,
+            # as that could cause a false "all zero" turnOff in _apply_levels.
+            log.warning(
+                "Bulb reports off but we last sent a non-zero value — "
+                "possible transient read or power loss; will reapply"
+            )
+            self.actual_levels = {"blue": 0.0, "white": 0.0, "uv": 0.0}
+            self.last_verified_at = time.time()
+            self.in_sync = False
+            return True
         else:
             cmap = self.config.get("channel_map", {"blue": "R", "white": "G", "uv": "B"})
             # Reverse channel_map: {"R": "blue", "G": "white", "B": "uv"}
@@ -489,6 +511,7 @@ class AquariumController:
                 # have just powered on with a stale or zeroed state.
                 self.last_applied_bytes = None
                 self.last_verified_at = 0.0
+                self._we_turned_off = True  # assume unknown state; turnOn if needed
 
             target = self.compute_target()
             self.target_levels = target
