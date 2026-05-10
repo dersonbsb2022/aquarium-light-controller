@@ -675,19 +675,29 @@ function updateNextPoint() {
   const sched = [...scheduleData].sort((a, b) => parseT(a.time) - parseT(b.time));
 
   const next = sched.find(s => parseT(s.time) > nowMin);
+  const prev = [...sched].reverse().find(s => parseT(s.time) <= nowMin);
+
   if (!next) {
     el.innerHTML = '<span class="arrow">●</span> ciclo encerrado';
     return;
   }
+
   const minsTo = parseT(next.time) - nowMin;
   const h = Math.floor(minsTo / 60);
   const m = Math.floor(minsTo % 60);
   const eta = h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m}min`;
   const label = next.label ? ` · ${next.label}` : '';
+
+  // Show both anchors so it's visually clear we're interpolating between
+  // a known previous point and a known next point — not "holding" anywhere.
+  const fromPart = prev
+    ? `<span class="label">${prev.time}</span> → `
+    : '';
   el.innerHTML =
-    `<span class="arrow">→</span> próximo ponto: <span class="label">${next.time}</span>` +
-    ` (B ${next.blue}% W ${next.white}% UV ${next.uv}%)${label} ` +
-    `em <span class="eta">${eta}</span>`;
+    `<span class="arrow">${prev ? '↻' : '→'}</span> ${fromPart}` +
+    `<span class="label">${next.time}</span>` +
+    ` (B ${next.blue}% W ${next.white}% UV ${next.uv}%)${label} · ` +
+    `<span class="eta">${eta}</span>`;
 }
 
 // ---- Relative time formatting ----

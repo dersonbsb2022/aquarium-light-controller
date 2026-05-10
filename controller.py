@@ -400,8 +400,22 @@ class AquariumController:
             for ch in ("blue", "white", "uv")
         )
         if not in_sync:
+            prev_anchor, next_anchor = self._get_anchors(self._now_minutes())
+            anchor_info = ""
+            if prev_anchor and next_anchor:
+                anchor_info = (
+                    f" [interpolando entre {prev_anchor['time']} "
+                    f"({prev_anchor['blue']}/{prev_anchor['white']}/{prev_anchor['uv']}) "
+                    f"e {next_anchor['time']} "
+                    f"({next_anchor['blue']}/{next_anchor['white']}/{next_anchor['uv']})]"
+                )
+            elif next_anchor and not prev_anchor:
+                anchor_info = f" [pré-amanhecer, próximo: {next_anchor['time']}]"
+            elif prev_anchor and not next_anchor:
+                anchor_info = f" [após último ponto: {prev_anchor['time']}]"
             log.warning(
-                "Drift detected. Expected=%s actual=%s — reapplying",
+                "Drift detected%s. Expected=%s actual=%s — reapplying",
+                anchor_info,
                 {k: round(v, 1) for k, v in expected.items()},
                 self.actual_levels,
             )
@@ -412,6 +426,30 @@ class AquariumController:
         """Current time as minutes since midnight."""
         now = datetime.now()
         return now.hour * 60 + now.minute + now.second / 60.0
+
+    def _get_anchors(self, now_min: float) -> tuple:
+        """
+        Identify which two schedule points we're currently interpolating
+        between. Returns (prev_anchor, next_anchor) where either may be None
+        if we're outside the schedule range.
+
+        Used by drift logs and the diagnostics API so the user can always
+        verify that the system understands itself to be mid-transition rather
+        than holding at a specific schedule point.
+        """
+        schedule = sorted(self.config["schedule"], key=lambda s: parse_time(s["time"]))
+        if not schedule:
+            return None, None
+        if now_min < parse_time(schedule[0]["time"]):
+            return None, schedule[0]
+        if now_min >= parse_time(schedule[-1]["time"]):
+            return schedule[-1], None
+        for i in range(len(schedule) - 1):
+            t0 = parse_time(schedule[i]["time"])
+            t1 = parse_time(schedule[i + 1]["time"])
+            if t0 <= now_min < t1:
+                return schedule[i], schedule[i + 1]
+        return None, None
 
     def compute_target(self) -> dict:
         """Compute the target brightness for each channel at the current time."""
@@ -493,6 +531,12 @@ class AquariumController:
             if self.actual_levels is not None
             else None
         )
+        # Surface anchors so callers can see which two schedule points the
+        # system thinks it's currently interpolating between. This is the
+        # ground-truth used by drift detection: expected = interpolation
+        # between these two anchors at the exact current minute, NOT the
+        # value of either anchor in isolation.
+        prev_anchor, next_anchor = self._get_anchors(self._now_minutes())
         return {
             "status": self.status,
             "time": now.strftime("%H:%M:%S"),
@@ -500,6 +544,8 @@ class AquariumController:
             "target_levels": {k: round(v, 1) for k, v in self.target_levels.items()},
             "actual_levels": actual,
             "in_sync": self.in_sync,
+            "prev_anchor": prev_anchor,
+            "next_anchor": next_anchor,
             "last_verified_at": self.last_verified_at if self.last_verified_at else None,
             "last_applied_at": self.last_applied_at if self.last_applied_at else None,
             "controller_ip": self.config.get("controller_ip"),
