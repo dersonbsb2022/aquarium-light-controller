@@ -349,10 +349,6 @@ class AquariumController:
         """Convert 0-100 percentage to 0-255 byte (linear, no calibration)."""
         return max(0, min(255, int(round(pct / 100.0 * 255))))
 
-    def _byte_to_pct(self, byte: int) -> float:
-        """Convert 0-255 byte back to 0-100 percentage."""
-        return round(max(0, min(255, byte)) / 255.0 * 100.0, 1)
-
     def _pct_to_byte_calibrated(self, pct: float, channel: str) -> int:
         """
         Convert 0-100 percentage to 0-255 byte using optional per-channel
@@ -391,6 +387,34 @@ class AquariumController:
         norm = (min(100.0, pct) / 100.0) ** gamma
         byte = int(round(min_b + (max_b - min_b) * norm))
         return max(0, min(255, byte))
+
+    def _byte_to_pct_calibrated(self, byte: int, channel: str) -> float:
+        """
+        Inverse of _pct_to_byte_calibrated: map raw device byte back to the
+        same 0–100% space used by the schedule and drift `expected` values.
+        """
+        if byte <= 0:
+            return 0.0
+        curves = self.config.get("channel_curves", {})
+        curve = curves.get(channel, {}) if isinstance(curves, dict) else {}
+        min_b = max(0, min(255, int(curve.get("min_byte", 0))))
+        max_b = max(0, min(255, int(curve.get("max_byte", 255))))
+        if max_b < min_b:
+            min_b, max_b = max_b, min_b
+        gamma = curve.get("gamma", 1.0)
+        try:
+            gamma = max(0.1, min(5.0, float(gamma)))
+        except (TypeError, ValueError):
+            gamma = 1.0
+        span = max_b - min_b
+        if span <= 0:
+            return 100.0 if byte >= max_b else 0.0
+        if byte <= min_b:
+            return 0.0
+        norm = (min(byte, max_b) - min_b) / span
+        norm = max(0.0, min(1.0, norm))
+        pct = 100.0 * (norm ** (1.0 / gamma))
+        return round(min(100.0, max(0.0, pct)), 1)
 
     def _target_to_bytes(self, target: dict) -> tuple:
         """Translate a target dict (blue/white/uv %) to a (R,G,B) byte tuple."""
@@ -492,12 +516,15 @@ class AquariumController:
             # Reverse channel_map: {"R": "blue", "G": "white", "B": "uv"}
             rev = {v: k for k, v in cmap.items()}
             byte_by_phys = {"R": r, "G": g, "B": b}
-            self.actual_levels = {
-                rev.get("R", "_"): self._byte_to_pct(byte_by_phys["R"]),
-                rev.get("G", "_"): self._byte_to_pct(byte_by_phys["G"]),
-                rev.get("B", "_"): self._byte_to_pct(byte_by_phys["B"]),
-            }
-            # Ensure all three logical channels exist
+            # Use inverse of channel_curves so "actual" % matches schedule % space
+            # (linear byte/255 was wrong when min_byte/gamma ≠ defaults — false drift).
+            self.actual_levels = {}
+            for phys, byte_val in byte_by_phys.items():
+                log_ch = rev.get(phys)
+                if log_ch in ("blue", "white", "uv"):
+                    self.actual_levels[log_ch] = self._byte_to_pct_calibrated(
+                        int(byte_val), log_ch
+                    )
             for ch in ("blue", "white", "uv"):
                 self.actual_levels.setdefault(ch, 0.0)
 
