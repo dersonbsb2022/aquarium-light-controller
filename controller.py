@@ -17,6 +17,7 @@ import signal
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from flux_led import WifiLedBulb
 
@@ -26,7 +27,7 @@ from flux_led import WifiLedBulb
 
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/data/config.json")
 WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
-API_PORT = int(os.environ.get("API_PORT", "8081"))
+WEB_DIR = os.environ.get("WEB_DIR", "/app/web")
 
 BUILD_SHA = os.environ.get("BUILD_SHA", "dev")
 BUILD_VERSION = os.environ.get("BUILD_VERSION", "local")
@@ -693,17 +694,29 @@ class AquariumController:
             log.info("Config updated")
 
 # ---------------------------------------------------------------------------
-# API Server
+# HTTP server (dashboard + API, same port)
 # ---------------------------------------------------------------------------
 
 controller = AquariumController()
 
 
-class APIHandler(SimpleHTTPRequestHandler):
-    """Minimal REST API for the controller."""
+class AquariumAppHandler(SimpleHTTPRequestHandler):
+    """
+    Serves the static dashboard and the JSON API on the same port.
+
+    Using one origin lets the UI call `/api/...` with relative URLs, which
+    works when the service is reached through a reverse proxy or tunnel
+    (Cloudflare, Tailscale, etc.) that exposes a single public URL.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=WEB_DIR, **kwargs)
 
     def log_message(self, fmt, *args):
         pass
+
+    def _request_path(self) -> str:
+        return urlparse(self.path).path
 
     def _send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode()
@@ -717,20 +730,24 @@ class APIHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_OPTIONS(self):
-        self._send_json({})
+        if self._request_path().startswith("/api"):
+            self._send_json({})
+        else:
+            self.send_error(405, "Method Not Allowed")
 
     def do_GET(self):
-        if self.path == "/api/state":
+        path = self._request_path()
+        if path == "/api/state":
             self._send_json(controller.get_state())
-        elif self.path == "/api/version":
+        elif path == "/api/version":
             self._send_json(BUILD_INFO)
-        elif self.path == "/api/config":
+        elif path == "/api/config":
             self._send_json(controller.config)
-        elif self.path == "/api/defaults":
+        elif path == "/api/defaults":
             # Returns the factory schedule. Read-only; does NOT touch saved config.
             # Frontend loads it into the editor so the user can review and Save.
             self._send_json(copy.deepcopy(DEFAULT_CONFIG))
-        elif self.path == "/api/preview":
+        elif path == "/api/preview":
             preview = []
             schedule = controller.config["schedule"]
             trans = controller.config.get("transition_minutes", 30)
@@ -742,11 +759,14 @@ class APIHandler(SimpleHTTPRequestHandler):
                     **{k: round(v, 1) for k, v in target.items()}
                 })
             self._send_json(preview)
-        else:
+        elif path.startswith("/api"):
             self._send_json({"error": "not found"}, 404)
+        else:
+            super().do_GET()
 
     def do_POST(self):
-        if self.path == "/api/config":
+        path = self._request_path()
+        if path == "/api/config":
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
@@ -760,19 +780,21 @@ class APIHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": f"JSON inválido: {e}"}, 400)
             except Exception as e:
                 self._send_json({"error": str(e)}, 400)
-        elif self.path == "/api/reconnect":
+        elif path == "/api/reconnect":
             controller.request_reconnect()
             self._send_json({"ok": True, "status": controller.status})
-        elif self.path == "/api/test":
+        elif path == "/api/test":
             self._handle_test()
-        elif self.path == "/api/test/channel":
+        elif path == "/api/test/channel":
             self._handle_test_channel()
-        elif self.path == "/api/test/cancel":
+        elif path == "/api/test/cancel":
             controller.test_mode_until = 0.0
             controller.last_applied_bytes = None
             self._send_json({"ok": True, "message": "test mode cancelled"})
-        else:
+        elif path.startswith("/api"):
             self._send_json({"error": "not found"}, 404)
+        else:
+            self.send_error(405, "Method Not Allowed")
 
     def _handle_test_channel(self):
         """
@@ -908,20 +930,6 @@ class APIHandler(SimpleHTTPRequestHandler):
                 self._send_json({"error": f"failed: {e}"}, 500)
 
 # ---------------------------------------------------------------------------
-# Web server for static files (dashboard)
-# ---------------------------------------------------------------------------
-
-WEB_DIR = os.environ.get("WEB_DIR", "/app/web")
-
-
-class WebHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=WEB_DIR, **kwargs)
-
-    def log_message(self, fmt, *args):
-        pass
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -934,18 +942,12 @@ def main():
     ctrl_thread = threading.Thread(target=controller.run, daemon=True)
     ctrl_thread.start()
 
-    api_server = HTTPServer(("0.0.0.0", API_PORT), APIHandler)
-    api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
-    api_thread.start()
-    log.info("API server on port %d", API_PORT)
-
-    web_server = HTTPServer(("0.0.0.0", WEB_PORT), WebHandler)
-    log.info("Web dashboard on port %d", WEB_PORT)
+    web_server = HTTPServer(("0.0.0.0", WEB_PORT), AquariumAppHandler)
+    log.info("HTTP on port %d — dashboard + /api (same origin)", WEB_PORT)
 
     def shutdown(sig, frame):
         log.info("Shutting down...")
         controller.stop()
-        api_server.shutdown()
         web_server.shutdown()
         sys.exit(0)
 

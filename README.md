@@ -16,7 +16,7 @@ Controlador de iluminação para aquário marinho com transições graduais (dim
 
 ```
 aquarium-light-controller/
-├── controller.py
+├── controller.py      # loop do controlador + HTTP (dashboard + /api na porta WEB_PORT)
 ├── Dockerfile
 ├── docker-compose.yml
 └── web/
@@ -106,6 +106,8 @@ A curva cosseno acelera suavemente no início, mantém velocidade constante no m
 
 ## API
 
+O dashboard e a API compartilham a **mesma porta** (`WEB_PORT`, padrão **8080**). O front chama caminhos relativos (`/api/...`), então basta publicar **uma** URL (por exemplo com túnel HTTPS) para ter o painel em tempo real falando com o controlador em casa.
+
 | Endpoint | Método | Descrição |
 |----------|--------|-----------|
 | `/api/state` | GET | Estado atual (níveis, status, erros) |
@@ -113,6 +115,14 @@ A curva cosseno acelera suavemente no início, mantém velocidade constante no m
 | `/api/config` | POST | Atualizar configuração |
 | `/api/preview` | GET | Curva de 24h (para o gráfico) |
 | `/api/reconnect` | POST | Forçar reconexão ao controlador |
+
+## Acesso externo (dashboard em tempo real)
+
+1. Atualize o container para uma imagem que sirva API e estáticos na mesma porta (apenas **8080** no `docker-compose`).
+2. Crie um túnel seguro até a máquina onde o Docker roda, apontando para `localhost:8080` — por exemplo [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/), ou VPN com IP acessível.
+3. Abra no navegador a URL pública do túnel; as requisições vão para o **mesmo host** que serviu a página, então `/api/state` e o gráfico continuam sincronizados com a luminária na sua rede.
+
+**Segurança:** hoje não há login na API. Quem tiver a URL pública pode ler e alterar a configuração. Para uso na internet, prefira túnel com autenticação (Cloudflare Access, Tailscale só para sua conta) ou um reverse proxy com senha/certificado.
 
 ## Portainer
 

@@ -637,7 +637,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 
 <script>
-const API = `${location.protocol}//${location.hostname}:8081`;
 let chart = null;
 let scheduleData = [];
 let isDirty = false;
@@ -756,7 +755,7 @@ function updateVersionBadge(build) {
 // ---- State polling ----
 async function loadState() {
   try {
-    const res = await fetch(`${API}/api/state`);
+    const res = await fetch('/api/state');
     const s = await res.json();
 
     // Status
@@ -819,7 +818,7 @@ async function loadState() {
 // ---- Force reload from server (clears unsaved changes) ----
 async function forceReload() {
   try {
-    const res = await fetch(`${API}/api/state`);
+    const res = await fetch('/api/state');
     const s = await res.json();
     safeSetValue('cfgIp',         s.controller_ip || '');
     safeSetValue('cfgTransition', s.transition_minutes);
@@ -916,7 +915,7 @@ async function saveConfig() {
     schedule: scheduleData
   };
   try {
-    const res = await fetch(`${API}/api/config`, {
+    const res = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -946,7 +945,7 @@ async function restoreDefaults() {
   if (!ok) return;
 
   try {
-    const res = await fetch(`${API}/api/defaults`);
+    const res = await fetch('/api/defaults');
     const defaults = await res.json();
 
     safeSetValue('cfgIp',         document.getElementById('cfgIp').value || defaults.controller_ip);
@@ -967,7 +966,7 @@ async function restoreDefaults() {
 
 async function reconnect() {
   try {
-    const res = await fetch(`${API}/api/reconnect`, { method: 'POST' });
+    const res = await fetch('/api/reconnect', { method: 'POST' });
     const data = await res.json();
     showToast(data.ok ? 'Reconectando...' : 'Falha ao reconectar', data.ok ? 'success' : 'error');
     setTimeout(loadState, 1500);
@@ -1015,7 +1014,7 @@ const nowLinePlugin = {
 
 async function loadPreview() {
   try {
-    const res = await fetch(`${API}/api/preview`);
+    const res = await fetch('/api/preview');
     const data = await res.json();
     renderChart(data);
   } catch (e) {
