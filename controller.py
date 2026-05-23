@@ -9,16 +9,18 @@ smooth transitions between brightness levels throughout the day.
 import copy
 import json
 import math
+import re
 import time
 import threading
 import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 from flux_led import WifiLedBulb
 
 # ---------------------------------------------------------------------------
@@ -121,6 +123,136 @@ def save_config(cfg: dict):
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     log.info("Config saved to %s", CONFIG_PATH)
+
+
+def profiles_dir() -> Path:
+    """Directory for schedule profiles (one JSON file per profile)."""
+    return Path(CONFIG_PATH).parent / "profiles"
+
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower())
+    slug = slug.strip("-")[:48] or "perfil"
+    return slug
+
+
+def _unique_profile_id(base: str) -> str:
+    d = profiles_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    if not (d / f"{base}.json").exists():
+        return base
+    for n in range(2, 1000):
+        candidate = f"{base}-{n}"
+        if not (d / f"{candidate}.json").exists():
+            return candidate
+    return f"{base}-{int(time.time())}"
+
+
+def _profile_path(profile_id: str) -> Path:
+    if not re.match(r"^[a-z0-9][a-z0-9-]{0,47}$", profile_id):
+        raise ValueError("invalid profile id")
+    return profiles_dir() / f"{profile_id}.json"
+
+
+def list_profiles() -> list:
+    """Return profile summaries sorted by name."""
+    d = profiles_dir()
+    if not d.exists():
+        return []
+    out = []
+    for path in sorted(d.glob("*.json")):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            out.append({
+                "id": data.get("id", path.stem),
+                "name": data.get("name", path.stem),
+                "transition_minutes": data.get("transition_minutes", 60),
+                "updated_at": data.get("updated_at"),
+                "point_count": len(data.get("schedule", [])),
+            })
+        except Exception as e:
+            log.warning("Skipping corrupt profile %s: %s", path.name, e)
+    out.sort(key=lambda p: (p["name"].lower(), p["id"]))
+    return out
+
+
+def load_profile(profile_id: str) -> dict:
+    path = _profile_path(profile_id)
+    if not path.exists():
+        raise FileNotFoundError(profile_id)
+    with open(path) as f:
+        data = json.load(f)
+    data.setdefault("id", profile_id)
+    return data
+
+
+def save_profile(profile: dict) -> dict:
+    """Write a profile JSON file. Returns the saved profile dict."""
+    profile_id = profile["id"]
+    path = _profile_path(profile_id)
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    profile.setdefault("created_at", now)
+    profile["updated_at"] = now
+    with open(path, "w") as f:
+        json.dump(profile, f, indent=2, ensure_ascii=False)
+    log.info("Profile saved: %s (%s)", profile.get("name"), profile_id)
+    return profile
+
+
+def delete_profile(profile_id: str):
+    path = _profile_path(profile_id)
+    if path.exists():
+        path.unlink()
+        log.info("Profile deleted: %s", profile_id)
+
+
+def profile_from_schedule(name: str, schedule: list, transition_minutes: float,
+                          profile_id: str = None) -> dict:
+    pid = profile_id or _unique_profile_id(_slugify(name))
+    return {
+        "id": pid,
+        "name": name.strip(),
+        "transition_minutes": transition_minutes,
+        "schedule": copy.deepcopy(schedule),
+    }
+
+
+def ensure_profiles_initialized(cfg: dict) -> dict:
+    """
+    Migrate legacy single-schedule config to the profiles folder.
+    Creates a 'padrao' profile from the current schedule if none exist.
+    """
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    existing = list_profiles()
+    active = cfg.get("active_profile_id")
+
+    if not existing:
+        pid = "padrao"
+        prof = profile_from_schedule(
+            name="Padrão",
+            schedule=cfg.get("schedule", DEFAULT_CONFIG["schedule"]),
+            transition_minutes=cfg.get("transition_minutes", 60),
+            profile_id=pid,
+        )
+        save_profile(prof)
+        cfg["active_profile_id"] = pid
+        save_config(cfg)
+        log.info("Created initial profile '%s' from config", pid)
+        return cfg
+
+    if active and any(p["id"] == active for p in existing):
+        return cfg
+
+    # active missing or invalid — pick first profile
+    cfg["active_profile_id"] = existing[0]["id"]
+    prof = load_profile(cfg["active_profile_id"])
+    cfg["schedule"] = prof["schedule"]
+    cfg["transition_minutes"] = prof.get("transition_minutes", 60)
+    save_config(cfg)
+    log.info("Set active profile to %s", cfg["active_profile_id"])
+    return cfg
 
 # ---------------------------------------------------------------------------
 # Schedule utilities (single source of truth for interpolation logic)
@@ -295,7 +427,7 @@ def validate_config(cfg: dict) -> list:
 
 class AquariumController:
     def __init__(self):
-        self.config = load_config()
+        self.config = ensure_profiles_initialized(load_config())
         self.bulb = None
         self.running = False
         self.current_levels = {"blue": 0, "white": 0, "uv": 0}
@@ -709,15 +841,116 @@ class AquariumController:
             "verification_interval_seconds": self.config.get("verification_interval_seconds", 300),
             "drift_tolerance_percent": self.config.get("drift_tolerance_percent", 2),
             "schedule": schedule,
+            "active_profile_id": self.config.get("active_profile_id"),
+            "active_profile_name": self._active_profile_name(),
             "last_error": self.last_error,
             "build": BUILD_INFO,
         }
+
+    def _active_profile_name(self) -> str:
+        pid = self.config.get("active_profile_id")
+        if not pid:
+            return ""
+        try:
+            return load_profile(pid).get("name", pid)
+        except FileNotFoundError:
+            return pid
+
+    def _sync_active_profile_file(self):
+        """Persist schedule + transition from config into the active profile JSON."""
+        pid = self.config.get("active_profile_id")
+        if not pid:
+            return
+        try:
+            prof = load_profile(pid)
+        except FileNotFoundError:
+            prof = profile_from_schedule(
+                name=self._active_profile_name() or "Padrão",
+                schedule=self.config.get("schedule", []),
+                transition_minutes=self.config.get("transition_minutes", 60),
+                profile_id=pid,
+            )
+        prof["schedule"] = copy.deepcopy(self.config.get("schedule", []))
+        prof["transition_minutes"] = self.config.get("transition_minutes", 60)
+        save_profile(prof)
+
+    def activate_profile(self, profile_id: str):
+        """Switch the running schedule to a saved profile."""
+        prof = load_profile(profile_id)
+        errors = validate_config({
+            "schedule": prof.get("schedule", []),
+            "transition_minutes": prof.get("transition_minutes", 60),
+        })
+        if errors:
+            raise ValueError("; ".join(errors))
+        with self.lock:
+            self.config["active_profile_id"] = profile_id
+            self.config["schedule"] = copy.deepcopy(prof["schedule"])
+            self.config["transition_minutes"] = prof.get("transition_minutes", 60)
+            save_config(self.config)
+            self.last_applied_bytes = None
+        log.info("Activated profile %s (%s)", profile_id, prof.get("name"))
+
+    def create_profile(self, name: str, schedule: list = None,
+                       transition_minutes: float = None) -> dict:
+        """Save a new profile file; does not activate it."""
+        sched = schedule if schedule is not None else self.config.get("schedule", [])
+        trans = transition_minutes if transition_minutes is not None else self.config.get(
+            "transition_minutes", 60
+        )
+        errors = validate_config({"schedule": sched, "transition_minutes": trans})
+        if errors:
+            raise ValueError("; ".join(errors))
+        prof = profile_from_schedule(name, sched, trans)
+        save_profile(prof)
+        return prof
+
+    def update_profile(self, profile_id: str, updates: dict) -> dict:
+        """Update an existing profile on disk."""
+        prof = load_profile(profile_id)
+        if "name" in updates and updates["name"]:
+            prof["name"] = str(updates["name"]).strip()
+        if "schedule" in updates:
+            prof["schedule"] = copy.deepcopy(updates["schedule"])
+        if "transition_minutes" in updates:
+            prof["transition_minutes"] = updates["transition_minutes"]
+        errors = validate_config({
+            "schedule": prof.get("schedule", []),
+            "transition_minutes": prof.get("transition_minutes", 60),
+        })
+        if errors:
+            raise ValueError("; ".join(errors))
+        save_profile(prof)
+        if self.config.get("active_profile_id") == profile_id:
+            with self.lock:
+                self.config["schedule"] = copy.deepcopy(prof["schedule"])
+                self.config["transition_minutes"] = prof.get("transition_minutes", 60)
+                save_config(self.config)
+                self.last_applied_bytes = None
+        return prof
+
+    def delete_profile(self, profile_id: str):
+        """Remove a profile file. Cannot delete the only remaining profile."""
+        profiles = list_profiles()
+        if len(profiles) <= 1:
+            raise ValueError("cannot delete the only profile")
+        if profile_id not in {p["id"] for p in profiles}:
+            raise FileNotFoundError(profile_id)
+        was_active = self.config.get("active_profile_id") == profile_id
+        delete_profile(profile_id)
+        if was_active:
+            remaining = list_profiles()
+            if remaining:
+                self.activate_profile(remaining[0]["id"])
 
     def update_config(self, new_config: dict):
         """Update configuration and save."""
         with self.lock:
             self.config.update(new_config)
             save_config(self.config)
+            if "schedule" in new_config or "transition_minutes" in new_config:
+                self._sync_active_profile_file()
+                self.last_applied_bytes = None
             log.info("Config updated")
 
 # ---------------------------------------------------------------------------
@@ -786,6 +1019,23 @@ class AquariumAppHandler(SimpleHTTPRequestHandler):
                     **{k: round(v, 1) for k, v in target.items()}
                 })
             self._send_json(preview)
+        elif path == "/api/profiles":
+            self._send_json({
+                "active_profile_id": controller.config.get("active_profile_id"),
+                "profiles": list_profiles(),
+            })
+        elif path == "/api/profile":
+            qs = parse_qs(urlparse(self.path).query)
+            pid = (qs.get("id") or [None])[0]
+            if not pid:
+                self._send_json({"error": "id required"}, 400)
+                return
+            try:
+                self._send_json(load_profile(pid))
+            except FileNotFoundError:
+                self._send_json({"error": "profile not found"}, 404)
+            except ValueError as e:
+                self._send_json({"error": str(e)}, 400)
         elif path.startswith("/api"):
             self._send_json({"error": "not found"}, 404)
         else:
@@ -818,10 +1068,97 @@ class AquariumAppHandler(SimpleHTTPRequestHandler):
             controller.test_mode_until = 0.0
             controller.last_applied_bytes = None
             self._send_json({"ok": True, "message": "test mode cancelled"})
+        elif path == "/api/profiles/create":
+            self._handle_profile_create()
+        elif path == "/api/profiles/activate":
+            self._handle_profile_activate()
+        elif path == "/api/profiles/update":
+            self._handle_profile_update()
+        elif path == "/api/profiles/delete":
+            self._handle_profile_delete()
         elif path.startswith("/api"):
             self._send_json({"error": "not found"}, 404)
         else:
             self.send_error(405, "Method Not Allowed")
+
+    def _read_json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length)) if length else {}
+
+    def _handle_profile_create(self):
+        try:
+            body = self._read_json_body()
+            name = str(body.get("name", "")).strip()
+            if not name:
+                self._send_json({"error": "name is required"}, 400)
+                return
+            schedule = body.get("schedule")
+            if schedule is None:
+                schedule = controller.config.get("schedule", [])
+            trans = body.get("transition_minutes", controller.config.get("transition_minutes", 60))
+            prof = controller.create_profile(name, schedule, trans)
+            self._send_json({"ok": True, "profile": prof})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+        except Exception as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _handle_profile_activate(self):
+        try:
+            body = self._read_json_body()
+            pid = str(body.get("id", "")).strip()
+            if not pid:
+                self._send_json({"error": "id is required"}, 400)
+                return
+            controller.activate_profile(pid)
+            self._send_json({
+                "ok": True,
+                "active_profile_id": pid,
+                "schedule": controller.config["schedule"],
+                "transition_minutes": controller.config.get("transition_minutes"),
+            })
+        except FileNotFoundError:
+            self._send_json({"error": "profile not found"}, 404)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _handle_profile_update(self):
+        try:
+            body = self._read_json_body()
+            pid = str(body.get("id", "")).strip()
+            if not pid:
+                self._send_json({"error": "id is required"}, 400)
+                return
+            updates = {}
+            if "name" in body:
+                updates["name"] = body["name"]
+            if "schedule" in body:
+                updates["schedule"] = body["schedule"]
+            if "transition_minutes" in body:
+                updates["transition_minutes"] = body["transition_minutes"]
+            prof = controller.update_profile(pid, updates)
+            self._send_json({"ok": True, "profile": prof})
+        except FileNotFoundError:
+            self._send_json({"error": "profile not found"}, 404)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+
+    def _handle_profile_delete(self):
+        try:
+            body = self._read_json_body()
+            pid = str(body.get("id", "")).strip()
+            if not pid:
+                self._send_json({"error": "id is required"}, 400)
+                return
+            controller.delete_profile(pid)
+            self._send_json({
+                "ok": True,
+                "active_profile_id": controller.config.get("active_profile_id"),
+            })
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+        except FileNotFoundError:
+            self._send_json({"error": "profile not found"}, 404)
 
     def _handle_test_channel(self):
         """

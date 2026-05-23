@@ -115,6 +115,29 @@ O dashboard e a API compartilham a **mesma porta** (`WEB_PORT`, padrão **8080**
 | `/api/config` | POST | Atualizar configuração |
 | `/api/preview` | GET | Curva de 24h (para o gráfico) |
 | `/api/reconnect` | POST | Forçar reconexão ao controlador |
+| `/api/profiles` | GET | Lista perfis salvos + perfil ativo |
+| `/api/profile?id=…` | GET | Um perfil completo (JSON) |
+| `/api/profiles/create` | POST | Criar perfil `{name, schedule?, transition_minutes?}` |
+| `/api/profiles/activate` | POST | Ativar perfil `{id}` |
+| `/api/profiles/update` | POST | Atualizar perfil `{id, name?, schedule?, …}` |
+| `/api/profiles/delete` | POST | Excluir perfil `{id}` |
+
+### Perfis de agenda
+
+Cada perfil é um arquivo JSON em `/data/profiles/` (volume Docker), por exemplo:
+
+```json
+{
+  "id": "ree-verao",
+  "name": "Reef — verão",
+  "transition_minutes": 60,
+  "schedule": [ … ],
+  "created_at": "2026-05-10T22:00:00Z",
+  "updated_at": "2026-05-10T22:00:00Z"
+}
+```
+
+O `config.json` guarda IP, mapeamento de canais e qual perfil está **ativo**. No dashboard: selecione o perfil, edite a agenda e clique **Salvar**.
 
 ## Acesso externo (dashboard em tempo real)
 

@@ -277,6 +277,55 @@
   .next-point .label { color: var(--text); }
   .next-point .eta   { color: var(--amber); }
 
+  /* Profile bar */
+  .profile-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-end;
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .profile-bar .setting-item {
+    flex: 1 1 200px;
+    min-width: 160px;
+    margin-bottom: 0;
+  }
+
+  .profile-bar select {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9rem;
+    padding: 8px 12px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    width: 100%;
+    cursor: pointer;
+  }
+
+  .profile-bar select:focus {
+    outline: none;
+    border-color: var(--blue);
+  }
+
+  .profile-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .profile-hint {
+    flex: 1 1 100%;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: 'JetBrains Mono', monospace;
+    margin: 0;
+  }
+
   /* Schedule editor */
   .schedule-list {
     display: flex;
@@ -596,6 +645,18 @@
   <!-- Schedule editor -->
   <div class="card">
     <div class="card-title">Agenda</div>
+    <div class="profile-bar">
+      <div class="setting-item">
+        <label>Perfil</label>
+        <select id="profileSelect" onchange="onProfileSelectChange()"></select>
+      </div>
+      <div class="profile-actions">
+        <button class="btn btn-secondary" type="button" onclick="createNewProfile()">＋ Novo perfil</button>
+        <button class="btn btn-secondary" type="button" onclick="renameProfile()">✎ Renomear</button>
+        <button class="btn btn-secondary" type="button" onclick="deleteCurrentProfile()">🗑 Excluir</button>
+      </div>
+      <p class="profile-hint">Perfis são salvos em JSON em <code>/data/profiles/</code>. «Salvar» grava no perfil ativo.</p>
+    </div>
     <div class="schedule-list" id="scheduleList"></div>
     <button class="btn btn-add" onclick="addRow()">＋ Adicionar horário</button>
     <div class="btn-row">
@@ -641,6 +702,8 @@ let chart = null;
 let scheduleData = [];
 let isDirty = false;
 let firstLoad = true;
+let profilesList = [];
+let activeProfileId = null;
 
 // ---- Dirty state tracking ----
 function markDirty() {
@@ -801,12 +864,15 @@ async function loadState() {
       safeSetValue('cfgInterval',   s.update_interval_seconds);
     }
 
+    if (s.active_profile_id) activeProfileId = s.active_profile_id;
+
     // Schedule — only replace on first load or explicit reload to avoid
     // destroying the DOM while the user is editing sliders
     if (firstLoad) {
       scheduleData = s.schedule || [];
       renderSchedule();
       loadPreview();
+      loadProfiles();
       firstLoad = false;
     }
   } catch (e) {
@@ -824,8 +890,10 @@ async function forceReload() {
     safeSetValue('cfgTransition', s.transition_minutes);
     safeSetValue('cfgInterval',   s.update_interval_seconds);
     scheduleData = s.schedule || [];
+    if (s.active_profile_id) activeProfileId = s.active_profile_id;
     renderSchedule();
     loadPreview();
+    loadProfiles();
     clearDirty();
     showToast('Dados recarregados', 'success');
   } catch (e) {
@@ -906,6 +974,160 @@ function clearAllRowDirty() {
   document.querySelectorAll('.schedule-row.dirty').forEach(r => r.classList.remove('dirty'));
 }
 
+// ---- Profiles ----
+async function loadProfiles() {
+  try {
+    const res = await fetch(`/api/profiles`);
+    const data = await res.json();
+    profilesList = data.profiles || [];
+    activeProfileId = data.active_profile_id || null;
+    const sel = document.getElementById('profileSelect');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    profilesList.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + (p.id === activeProfileId ? ' ●' : '');
+      sel.appendChild(opt);
+    });
+    if (activeProfileId) sel.value = activeProfileId;
+    else if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  } catch (e) {
+    console.warn('loadProfiles failed', e);
+  }
+}
+
+async function onProfileSelectChange() {
+  const sel = document.getElementById('profileSelect');
+  const newId = sel.value;
+  if (!newId || newId === activeProfileId) return;
+
+  if (isDirty) {
+    const ok = confirm(
+      'Há alterações não salvas neste perfil.\n\n' +
+      'Trocar mesmo assim? (as mudanças serão descartadas)'
+    );
+    if (!ok) {
+      sel.value = activeProfileId;
+      return;
+    }
+  }
+
+  try {
+    const res = await fetch(`/api/profiles/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: newId })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast(data.error || 'Falha ao ativar perfil', 'error');
+      sel.value = activeProfileId;
+      return;
+    }
+    activeProfileId = newId;
+    scheduleData = data.schedule || [];
+    safeSetValue('cfgTransition', data.transition_minutes);
+    clearDirty();
+    clearAllRowDirty();
+    renderSchedule();
+    loadPreview();
+    loadProfiles();
+    showToast('Perfil ativado', 'success');
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+    sel.value = activeProfileId;
+  }
+}
+
+async function createNewProfile() {
+  const name = prompt('Nome do novo perfil:', 'Meu perfil');
+  if (!name || !name.trim()) return;
+
+  const body = {
+    name: name.trim(),
+    schedule: scheduleData,
+    transition_minutes: +document.getElementById('cfgTransition').value
+  };
+  try {
+    const res = await fetch(`/api/profiles/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast(data.error || 'Falha ao criar', 'error');
+      return;
+    }
+    const activate = confirm(
+      `Perfil «${data.profile.name}» criado.\n\nAtivar agora?`
+    );
+    await loadProfiles();
+    if (activate) {
+      document.getElementById('profileSelect').value = data.profile.id;
+      await onProfileSelectChange();
+    } else {
+      showToast('Perfil criado', 'success');
+    }
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+  }
+}
+
+async function renameProfile() {
+  if (!activeProfileId) return;
+  const current = profilesList.find(p => p.id === activeProfileId);
+  const name = prompt('Novo nome do perfil:', current?.name || '');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await fetch(`/api/profiles/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: activeProfileId, name: name.trim() })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      await loadProfiles();
+      showToast('Perfil renomeado', 'success');
+    } else {
+      showToast(data.error || 'Falha', 'error');
+    }
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+  }
+}
+
+async function deleteCurrentProfile() {
+  if (!activeProfileId) return;
+  const current = profilesList.find(p => p.id === activeProfileId);
+  if (profilesList.length <= 1) {
+    showToast('Não é possível excluir o único perfil', 'error');
+    return;
+  }
+  const ok = confirm(`Excluir o perfil «${current?.name || activeProfileId}»?\n\nEsta ação não pode ser desfeita.`);
+  if (!ok) return;
+  try {
+    const res = await fetch(`/api/profiles/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: activeProfileId })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast(data.error || 'Falha ao excluir', 'error');
+      return;
+    }
+    activeProfileId = data.active_profile_id;
+    clearDirty();
+    await loadProfiles();
+    await forceReload();
+    showToast('Perfil excluído', 'success');
+  } catch (e) {
+    showToast('Erro de conexão', 'error');
+  }
+}
+
 // ---- Save config ----
 async function saveConfig() {
   const body = {
@@ -924,8 +1146,9 @@ async function saveConfig() {
     if (data.ok) {
       clearDirty();
       clearAllRowDirty();
-      showToast('Configuração salva!', 'success');
+      showToast('Perfil e configuração salvos!', 'success');
       loadPreview();
+      loadProfiles();
     } else {
       showToast(`Erro: ${data.error || 'falha ao salvar'}`, 'error');
     }
@@ -1212,6 +1435,7 @@ function updateClock() {
 }
 
 // ---- Init ----
+loadProfiles();
 loadState();
 setInterval(loadState, 5000);
 setInterval(updateClock, 1000);
