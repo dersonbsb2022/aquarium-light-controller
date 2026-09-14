@@ -806,6 +806,31 @@ class AquariumController:
         self.running = False
         log.info("Controller stopping...")
 
+    def get_health(self) -> tuple:
+        """
+        Lightweight health payload for Docker/Traefik probes.
+
+        Returns (payload_dict, http_status):
+          200 — process is up and the bulb control loop is operational
+                (running / connected / test)
+          503 — bulb disconnected, reconnecting, or still initializing
+
+        Does NOT restart the container just for a brief Wi-Fi blip on its own —
+        Swarm/Compose healthcheck retries (retries + start_period) absorb that.
+        """
+        healthy_statuses = ("running", "connected", "test")
+        ok = self.status in healthy_statuses
+        payload = {
+            "ok": ok,
+            "status": self.status,
+            "in_sync": self.in_sync,
+            "bulb_connected": self.bulb is not None,
+            "last_error": self.last_error,
+            "active_profile_id": self.config.get("active_profile_id"),
+            "build": BUILD_INFO,
+        }
+        return payload, (200 if ok else 503)
+
     def get_state(self) -> dict:
         """Return current state for the API."""
         schedule = sorted(self.config["schedule"], key=lambda s: parse_time(s["time"]))
@@ -997,7 +1022,10 @@ class AquariumAppHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self._request_path()
-        if path == "/api/state":
+        if path == "/api/health" or path == "/health":
+            payload, status = controller.get_health()
+            self._send_json(payload, status)
+        elif path == "/api/state":
             self._send_json(controller.get_state())
         elif path == "/api/version":
             self._send_json(BUILD_INFO)

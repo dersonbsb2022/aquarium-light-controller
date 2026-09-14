@@ -5,15 +5,43 @@ services:
       - "8080:8080"
     volumes:
       - aquarium_data:/data
+    networks:
+      - netsrv
     environment:
       - CONFIG_PATH=/data/config.json
       - WEB_PORT=8080
       - TZ=America/Sao_Paulo
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
         delay: 5s
+      labels:
+        - traefik.enable=true
+        - traefik.swarm.network=netsrv
+        - traefik.http.routers.aquarium-light.rule=Host(`light.tmcsuporte.com.br`)
+        - traefik.http.routers.aquarium-light.entrypoints=websecure
+        - traefik.http.routers.aquarium-light.tls=true
+        - traefik.http.routers.aquarium-light.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.aquarium-light.middlewares=aquarium-light-auth
+        - traefik.http.routers.aquarium-light.service=aquarium-light
+        - traefik.http.middlewares.aquarium-light-auth.basicauth.users=anderson:$$2y$$05$$yBi3QgbJsUzMs68Kcvhb8uuFoZCuCNgwF5JCEAgUW73q76H6xebLa
+        - traefik.http.services.aquarium-light.loadbalancer.server.port=8080
+        # Traefik hits the container directly (not via BasicAuth router)
+        - traefik.http.services.aquarium-light.loadbalancer.healthcheck.path=/api/health
+        - traefik.http.services.aquarium-light.loadbalancer.healthcheck.interval=30s
+        - traefik.http.services.aquarium-light.loadbalancer.healthcheck.timeout=5s
+
+networks:
+  netsrv:
+    external: true
+    name: netsrv
 
 volumes:
   aquarium_data:

@@ -110,6 +110,8 @@ O dashboard e a API compartilham a **mesma porta** (`WEB_PORT`, padrão **8080**
 
 | Endpoint | Método | Descrição |
 |----------|--------|-----------|
+| `/api/health` | GET | Healthcheck (200 = operacional, 503 = desconectado/inicializando) |
+| `/health` | GET | Alias de `/api/health` |
 | `/api/state` | GET | Estado atual (níveis, status, erros) |
 | `/api/config` | GET | Configuração completa |
 | `/api/config` | POST | Atualizar configuração |

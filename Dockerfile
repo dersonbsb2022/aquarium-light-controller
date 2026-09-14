@@ -25,7 +25,10 @@ LABEL org.opencontainers.image.created=${BUILD_DATE}
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/state')" || exit 1
+# start_period absorbs cold-start connect attempts before marking unhealthy.
+# /api/health returns 503 while disconnected so Swarm can reschedule if the
+# controller stays offline past retries.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')" || exit 1
 
 CMD ["python", "-u", "controller.py"]
